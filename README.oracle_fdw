@@ -133,6 +133,60 @@ will issue an implicit COMMIT.
 You are best advised to use this function outside of multi-statement
 transactions.
 
+    FUNCTION oracle_query(server name, stmt text, params text[] DEFAULT NULL)
+           RETURNS SETOF record
+    FUNCTION oracle_scalar(server name, stmt text, params text[] DEFAULT NULL)
+           RETURNS text
+
+These functions can be used to execute a query that returns a result on the
+remote Oracle server, typically a call of a remote function or a package
+procedure that Oracle database links otherwise provide.
+
+`oracle_query` returns all result rows.  Since the result types cannot be
+determined at function definition time, you have to supply a column definition
+list at the call site:
+
+    SELECT * FROM oracle_query('oradb', 'SELECT * FROM all_users')
+        AS q(username text, user_id numeric);
+
+The statement can contain bind parameters `:1`, `:2`, ... that are set from
+the elements of the **params** array (a NULL array element binds SQL NULL;
+the values are passed as strings and interpreted by Oracle):
+
+    SELECT * FROM oracle_query(
+               'oradb',
+               'SELECT first_name FROM employees WHERE department_id = :1',
+               ARRAY[50]) AS q(first_name text);
+
+The result values are converted to strings by Oracle according to the NLS
+settings of the session, then converted to the PostgreSQL types from the
+column definition list using the type input functions.
+Only data types with a sensible string representation are supported in the
+select list (CHAR/VARCHAR2, NUMBER, FLOAT, BINARY_FLOAT, BINARY_DOUBLE, DATE,
+TIMESTAMP, INTERVAL and RAW); convert other types (LOBs, LONG and
+user-defined types) explicitly with CAST or TO_CHAR.
+
+`oracle_scalar` is a convenience variant that returns the first column of the
+first result row as text (NULL if the query returns no rows).  That is useful
+to call remote functions, for example:
+
+    -- Oracle: apps.pkg.get_gl_code_combination_id@oebs('01.' || seg2 || ...)
+    SELECT oracle_scalar('oebs',
+           'SELECT apps.pkg.get_gl_code_combination_id(:1) FROM dual',
+           ARRAY['01.' || seg2 || '.' || seg3]);
+
+To keep the migrated code readable, you can wrap such calls in small
+PostgreSQL functions with the appropriate argument and result types.
+
+The same caveats as for `oracle_execute` apply: the functions run with the
+permissions of the current user's mapping, and remote statements that modify
+data or have other side effects do not participate in oracle_fdw's two-phase
+transaction management, so an implicit COMMIT inside a called PL/SQL function
+cannot be rolled back with the local transaction.
+Also note that calling these functions once per row of a table causes one
+network round trip per call; for bulk processing it is more efficient to run
+a single query with `oracle_query` that computes all results at once.
+
 3 Options
 =========
 

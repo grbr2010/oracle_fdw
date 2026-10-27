@@ -669,3 +669,37 @@ UNION ALL
 SELECT * FROM b;
 
 ROLLBACK;
+
+/* test oracle_scalar and oracle_query */
+
+SELECT oracle_scalar('oracle', 'SELECT 42 FROM dual');
+SELECT oracle_scalar('oracle', 'SELECT :1 || :2 FROM dual', ARRAY['foo', 'bar']);
+SELECT oracle_scalar('oracle', 'SELECT CASE WHEN :1 IS NULL THEN ''is null'' ELSE ''is not null'' END FROM dual', ARRAY[NULL::text]);
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual WHERE 1 = 0');
+
+SELECT * FROM oracle_query('oracle', 'SELECT level, ''row'' || level FROM dual CONNECT BY level <= 3') AS q(n numeric, s text);
+SELECT count(*) FROM oracle_query('oracle', 'SELECT 1 FROM dual WHERE 1 = 0') AS q(n numeric);
+
+-- the number of result columns must match the column definition list
+SELECT * FROM oracle_query('oracle', 'SELECT 1, 2 FROM dual') AS q(n numeric);
+-- statements that do not return a result are rejected
+SELECT * FROM oracle_query('oracle', 'DELETE FROM typetest1 WHERE 1 = 0') AS q(n numeric);
+-- remote errors are reported
+SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);
+
+/* test oracle_scalar and oracle_query */
+
+SELECT oracle_scalar('oracle', 'SELECT 42 FROM dual');
+SELECT oracle_scalar('oracle', 'SELECT :1 || :2 FROM dual', ARRAY['foo', 'bar']);
+SELECT oracle_scalar('oracle', 'SELECT CASE WHEN :1 IS NULL THEN ''is null'' ELSE ''is not null'' END FROM dual', ARRAY[NULL::text]);
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual WHERE 1 = 0');
+
+SELECT * FROM oracle_query('oracle', 'SELECT level, ''row'' || level FROM dual CONNECT BY level <= 3') AS q(n numeric, s text);
+SELECT count(*) FROM oracle_query('oracle', 'SELECT 1 FROM dual WHERE 1 = 0') AS q(n numeric);
+
+-- the number of result columns must match the column definition list
+SELECT * FROM oracle_query('oracle', 'SELECT 1, 2 FROM dual') AS q(n numeric);
+-- statements that do not return a result are rejected
+SELECT * FROM oracle_query('oracle', 'DELETE FROM typetest1 WHERE 1 = 0') AS q(n numeric);
+-- remote errors are reported
+SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);

@@ -167,6 +167,19 @@ struct paramDesc
 	struct paramDesc *next;
 };
 
+/*
+ * Result of a dynamic query executed with oracleExecDynamic.
+ * All the memory is allocated with oracleAlloc in the current memory context;
+ * it is the caller's responsibility to use a context that lives long enough.
+ */
+struct dynResult
+{
+	int ncols;       /* number of result columns */
+	char **colname;  /* column names */
+	long nrows;      /* number of result rows */
+	char ***values;  /* values[row][column], NULL for NULL values */
+};
+
 /* PostgreSQL error messages we need */
 typedef enum
 {
@@ -221,6 +234,7 @@ extern void oraclePrepareQuery(oracleSession *session, const char *query, const 
 extern unsigned int oracleExecuteQuery(oracleSession *session, const struct oraTable *oraTable, struct paramDesc *paramList, unsigned int prefetch);
 extern unsigned int oracleFetchNext(oracleSession *session, unsigned int prefetch);
 extern void oracleExecuteCall(oracleSession *session, char * const stmt);
+extern struct dynResult *oracleExecDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch);
 extern void oracleGetLob(oracleSession *session, void *locptr, oraType type, char **value, long *value_len);
 extern void oracleClientVersion(int *major, int *minor, int *update, int *patch, int *port_patch);
 extern void oracleServerVersion(oracleSession *session, int *major, int *minor, int *update, int *patch, int *port_patch);
