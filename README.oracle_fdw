@@ -156,7 +156,7 @@ the values are passed as strings and interpreted by Oracle):
     SELECT * FROM oracle_query(
                'oradb',
                'SELECT first_name FROM employees WHERE department_id = :1',
-               ARRAY[50]) AS q(first_name text);
+               ARRAY[50::text]) AS q(first_name text);
 
 The result values are converted to strings by Oracle according to the NLS
 settings of the session, then converted to the PostgreSQL types from the

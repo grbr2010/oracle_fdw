@@ -669,37 +669,28 @@ UNION ALL
 SELECT * FROM b;
 
 ROLLBACK;
+/* test oracle_scalar and oracle_query calling remote functions */
 
-/* test oracle_scalar and oracle_query */
+-- create a test package on the Oracle server
+SELECT oracle_execute('oracle', 'CREATE OR REPLACE PACKAGE scott.testpkg IS FUNCTION mult(a integer, b integer) RETURN integer; FUNCTION greet(who varchar2) RETURN varchar2; FUNCTION nvl_len(who varchar2) RETURN integer; FUNCTION boom RETURN integer; END;');
+SELECT oracle_execute('oracle', 'CREATE OR REPLACE PACKAGE BODY scott.testpkg IS FUNCTION mult(a integer, b integer) RETURN integer IS BEGIN RETURN a * b; END; FUNCTION greet(who varchar2) RETURN varchar2 IS BEGIN RETURN ''hello '' || who; END; FUNCTION nvl_len(who varchar2) RETURN integer IS BEGIN RETURN nvl(length(who), 0); END; FUNCTION boom RETURN integer IS BEGIN RAISE_APPLICATION_ERROR(-20142, ''custom failure''); RETURN 0; END; END;');
 
-SELECT oracle_scalar('oracle', 'SELECT 42 FROM dual');
-SELECT oracle_scalar('oracle', 'SELECT :1 || :2 FROM dual', ARRAY['foo', 'bar']);
-SELECT oracle_scalar('oracle', 'SELECT CASE WHEN :1 IS NULL THEN ''is null'' ELSE ''is not null'' END FROM dual', ARRAY[NULL::text]);
-SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual WHERE 1 = 0');
+-- call the remote package functions with bind parameters
+SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.mult(:1, :2) FROM dual', ARRAY['6', '7']);
+SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.greet(:1) FROM dual', ARRAY['world']);
+SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.nvl_len(:1) FROM dual', ARRAY[NULL::text]);
+SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.nvl_len(:1) FROM dual', ARRAY['abc']);
+SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.mult(1, 1) FROM dual WHERE 1 = 0');
 
-SELECT * FROM oracle_query('oracle', 'SELECT level, ''row'' || level FROM dual CONNECT BY level <= 3') AS q(n numeric, s text);
-SELECT count(*) FROM oracle_query('oracle', 'SELECT 1 FROM dual WHERE 1 = 0') AS q(n numeric);
+SELECT * FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(level, 2) n, scott.testpkg.greet(''u'' || level) g FROM dual CONNECT BY level <= 2') AS q(n numeric, g text);
+SELECT count(*) FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(1, 1) FROM dual WHERE 1 = 0') AS q(n numeric);
 
+-- errors raised inside the PL/SQL code are reported
+SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
 -- the number of result columns must match the column definition list
-SELECT * FROM oracle_query('oracle', 'SELECT 1, 2 FROM dual') AS q(n numeric);
+SELECT * FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(1, 1), scott.testpkg.mult(2, 2) FROM dual') AS q(n numeric);
 -- statements that do not return a result are rejected
 SELECT * FROM oracle_query('oracle', 'DELETE FROM typetest1 WHERE 1 = 0') AS q(n numeric);
 -- remote errors are reported
 SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);
-
-/* test oracle_scalar and oracle_query */
-
-SELECT oracle_scalar('oracle', 'SELECT 42 FROM dual');
-SELECT oracle_scalar('oracle', 'SELECT :1 || :2 FROM dual', ARRAY['foo', 'bar']);
-SELECT oracle_scalar('oracle', 'SELECT CASE WHEN :1 IS NULL THEN ''is null'' ELSE ''is not null'' END FROM dual', ARRAY[NULL::text]);
-SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual WHERE 1 = 0');
-
-SELECT * FROM oracle_query('oracle', 'SELECT level, ''row'' || level FROM dual CONNECT BY level <= 3') AS q(n numeric, s text);
-SELECT count(*) FROM oracle_query('oracle', 'SELECT 1 FROM dual WHERE 1 = 0') AS q(n numeric);
-
--- the number of result columns must match the column definition list
-SELECT * FROM oracle_query('oracle', 'SELECT 1, 2 FROM dual') AS q(n numeric);
--- statements that do not return a result are rejected
-SELECT * FROM oracle_query('oracle', 'DELETE FROM typetest1 WHERE 1 = 0') AS q(n numeric);
--- remote errors are reported
-SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);
+SELECT oracle_execute('oracle', 'DROP PACKAGE scott.testpkg');
