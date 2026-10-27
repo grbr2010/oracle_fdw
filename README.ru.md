@@ -8,6 +8,18 @@ oracle_fdw — это расширение PostgreSQL, предоставляю�
 данных Oracle, включая проталкивание условий WHERE и нужных столбцов,
 а также всестороннюю поддержку EXPLAIN.
 
+> **Об этом форке:** этот репозиторий — форк
+> [laurenz/oracle_fdw](https://github.com/laurenz/oracle_fdw), созданный для
+> миграции на PostgreSQL кода Oracle, использующего database link и вызовы
+> удалённых функций и пакетов PL/SQL.  В отличие от оригинала, он содержит
+> функции `oracle_query`, `oracle_scalar`, `oracle_call` и `oracle_exec`
+> (ветка `feature/oracle-query`), которые позволяют выполнять запросы и
+> вызывать удалённые функции, процедуры и анонимные блоки PL/SQL на сервере
+> Oracle из PostgreSQL; см. разделы
+> [Объекты, создаваемые расширением](#2-объекты-создаваемые-расширением) и
+> [Использование](#4-использование).  Всё остальное — исходный код оригинала
+> без изменений; форк синхронизируется с оригиналом слияниями.
+
 Этот README состоит из следующих разделов:
 
 1. [Быстрый старт](#1-быстрый-старт)
@@ -225,10 +237,10 @@ NTT OSS Center.
 вычисляются одним оператором на сервере Oracle:
 
     SELECT * FROM oracle_query('oradb',
-               'SELECT d.doc_id, hr.calc_rating(d.cd_vf, d.datef, d.valute)
-                FROM doc_table d WHERE d.dt >= :1',
+               'SELECT e.ename, scott.calc_bonus(e.ename, e.hiredate, e.job)
+                FROM emp e WHERE e.hiredate >= :1',
                ARRAY[to_char(current_date, 'YYYY-MM-DD HH24:MI:SS')])
-        AS q(doc_id numeric, rating numeric);
+        AS q(ename text, bonus numeric);
 
 Учтите, что параметр связывания типа DATE должен передаваться в формате
 `NLS_DATE_FORMAT` сеанса oracle_fdw, то есть `YYYY-MM-DD HH24:MI:SS`;
@@ -251,25 +263,22 @@ DATE, TIMESTAMP, INTERVAL и RAW); остальные типы (LOB, LONG и
 `oracle_scalar` возвращает первый столбец первой строки результата как
 `text`, поэтому приводите результат к нужному типу.  В присваиваниях внутри
 функций PL/pgSQL она заменяет присваивание через Oracle database link
-`x := apps.pkg.func@dblink(...)`:
+`x := pkg.func@dblink(...)`:
 
-    -- Oracle: DIST_CODE_COMBINATION_ID :=
-    --          apps.xxfm10x12b_1_iface_pkg.get_gl_code_combination_id@oebs(
-    --             '01.' || np_seg2 || '.' || np_seg3 || ...)
-    DIST_CODE_COMBINATION_ID := oracle_scalar('oebs',
-        'SELECT apps.xxfm10x12b_1_iface_pkg.get_gl_code_combination_id(:1)
-         FROM dual',
-        ARRAY['01.' || np_seg2 || '.' || np_seg3 || '.' || np_seg4
-              || '.' || np_seg5 || '.00.000.01'])::numeric;
+    -- Oracle: empno := scott.get_empno@dblink('SCOTT')
+    empno := oracle_scalar('oradb',
+        'SELECT scott.get_empno(:1) FROM dual',
+        ARRAY['SCOTT'])::numeric;
 
 В предложении WHERE она заменяет вызов удалённой функции вида
-`WHERE abc.rat@dblink(a, b, c) <> 0`; функция вызывается один раз для
-каждой строки локальной таблицы, как и вызов через Oracle database link:
+`WHERE scott.calc_bonus@dblink(a, b, c) <> 0`; функция вызывается один раз
+для каждой строки локальной таблицы, как и вызов через Oracle database link:
 
-    SELECT * FROM docs d
+    SELECT * FROM emp e
     WHERE oracle_scalar('oradb',
-          'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
-          ARRAY[d.cd_vf, to_char(d.datef, 'YYYY-MM-DD'), d.valute])::numeric
+          'SELECT scott.calc_bonus(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3)
+           FROM dual',
+          ARRAY[e.ename, to_char(e.hiredate, 'YYYY-MM-DD'), e.job])::numeric
           <> 0;
 
 Чтобы перенесённый код оставался читаемым, оборачивайте такие вызовы
@@ -277,24 +286,26 @@ DATE, TIMESTAMP, INTERVAL и RAW); остальные типы (LOB, LONG и
 и результата; перенесённые операторы тогда выглядят почти как исходный код
 Oracle:
 
-    CREATE FUNCTION abc_rat(cd_vf text, datef date, valute text)
+    CREATE FUNCTION calc_bonus(ename text, hiredate date, job text)
        RETURNS numeric
        LANGUAGE sql
     AS $$
        SELECT oracle_scalar('oradb',
-              'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
-              ARRAY[cd_vf, to_char(datef, 'YYYY-MM-DD'), valute])::numeric
+              'SELECT scott.calc_bonus(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3)
+               FROM dual',
+              ARRAY[ename, to_char(hiredate, 'YYYY-MM-DD'), job])::numeric
     $$;
 
-    SELECT * FROM docs d WHERE abc_rat(d.cd_vf, d.datef, d.valute) <> 0;
+    SELECT * FROM emp e WHERE calc_bonus(e.ename, e.hiredate, e.job) <> 0;
 
 Если вам нужно одно значение не типа `text`, либо приведите результат
 к нужному типу, либо используйте `oracle_query` со списком определений
 столбцов, которая даёт правильно типизированный результат:
 
-    SELECT rating FROM oracle_query('oradb',
-           'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
-           ARRAY['A', '2026-01-01', 'USD']) AS q(rating numeric);
+    SELECT bonus FROM oracle_query('oradb',
+           'SELECT scott.calc_bonus(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3)
+            FROM dual',
+           ARRAY['SMITH', '1980-12-17', 'CLERK']) AS q(bonus numeric);
 
 **oracle_call подробно**
 

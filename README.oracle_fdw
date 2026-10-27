@@ -7,6 +7,18 @@ oracle_fdw is a PostgreSQL extension that provides a Foreign Data Wrapper for
 easy and efficient access to Oracle databases, including pushdown of WHERE
 conditions and required columns as well as comprehensive EXPLAIN support.
 
+> **About this fork:** this repository is a fork of
+> [laurenz/oracle_fdw](https://github.com/laurenz/oracle_fdw) created for
+> migrating Oracle code that uses database links and calls of remote PL/SQL
+> functions and packages to PostgreSQL.  Unlike upstream, it provides the
+> functions `oracle_query`, `oracle_scalar`, `oracle_call` and `oracle_exec`
+> (branch `feature/oracle-query`), which allow executing queries and calling
+> remote PL/SQL functions, procedures and anonymous blocks on the Oracle
+> server from PostgreSQL; see sections
+> [Objects created by the extension](#2-objects-created-by-the-extension)
+> and [Usage](#4-usage).  Everything else is the unchanged upstream code;
+> the fork is kept in sync with upstream by merging it.
+
 This README contains the following sections:
 
 1. [Cookbook](#1-cookbook)
@@ -219,10 +231,10 @@ row in PostgreSQL (one network round trip per call), compute all the results
 in a single statement on the Oracle server:
 
     SELECT * FROM oracle_query('oradb',
-               'SELECT d.doc_id, hr.calc_rating(d.cd_vf, d.datef, d.valute)
-                FROM doc_table d WHERE d.dt >= :1',
+               'SELECT e.ename, scott.calc_bonus(e.ename, e.hiredate, e.job)
+                FROM emp e WHERE e.hiredate >= :1',
                ARRAY[to_char(current_date, 'YYYY-MM-DD HH24:MI:SS')])
-        AS q(doc_id numeric, rating numeric);
+        AS q(ename text, bonus numeric);
 
 Note that a DATE bind parameter must be passed in the `NLS_DATE_FORMAT` of
 the oracle_fdw session, which is `YYYY-MM-DD HH24:MI:SS`; for a different
@@ -244,49 +256,48 @@ A RAW column is transferred as a hex string: declare the result column as
 `oracle_scalar` returns the first column of the first result row as `text`,
 so cast the result to the type you need.  In assignments inside PL/pgSQL
 functions, this replaces the Oracle database link assignment
-`x := apps.pkg.func@dblink(...)`:
+`x := pkg.func@dblink(...)`:
 
-    -- Oracle: DIST_CODE_COMBINATION_ID :=
-    --          apps.xxfm10x12b_1_iface_pkg.get_gl_code_combination_id@oebs(
-    --             '01.' || np_seg2 || '.' || np_seg3 || ...)
-    DIST_CODE_COMBINATION_ID := oracle_scalar('oebs',
-        'SELECT apps.xxfm10x12b_1_iface_pkg.get_gl_code_combination_id(:1)
-         FROM dual',
-        ARRAY['01.' || np_seg2 || '.' || np_seg3 || '.' || np_seg4
-              || '.' || np_seg5 || '.00.000.01'])::numeric;
+    -- Oracle: empno := scott.get_empno@dblink('SCOTT')
+    empno := oracle_scalar('oradb',
+        'SELECT scott.get_empno(:1) FROM dual',
+        ARRAY['SCOTT'])::numeric;
 
 In a WHERE clause, this replaces a remote function call like
-`WHERE abc.rat@dblink(a, b, c) <> 0`; the function is called once per row of
-the local table, just like the Oracle database link call was:
+`WHERE scott.calc_bonus@dblink(a, b, c) <> 0`; the function is called once
+per row of the local table, just like the Oracle database link call was:
 
-    SELECT * FROM docs d
+    SELECT * FROM emp e
     WHERE oracle_scalar('oradb',
-          'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
-          ARRAY[d.cd_vf, to_char(d.datef, 'YYYY-MM-DD'), d.valute])::numeric
+          'SELECT scott.calc_bonus(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3)
+           FROM dual',
+          ARRAY[e.ename, to_char(e.hiredate, 'YYYY-MM-DD'), e.job])::numeric
           <> 0;
 
 To keep migrated code readable, wrap such calls in small PostgreSQL functions
 with the appropriate argument and result types; the migrated statements then
 look almost like the original Oracle code:
 
-    CREATE FUNCTION abc_rat(cd_vf text, datef date, valute text)
+    CREATE FUNCTION calc_bonus(ename text, hiredate date, job text)
        RETURNS numeric
        LANGUAGE sql
     AS $$
        SELECT oracle_scalar('oradb',
-              'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
-              ARRAY[cd_vf, to_char(datef, 'YYYY-MM-DD'), valute])::numeric
+              'SELECT scott.calc_bonus(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3)
+               FROM dual',
+              ARRAY[ename, to_char(hiredate, 'YYYY-MM-DD'), job])::numeric
     $$;
 
-    SELECT * FROM docs d WHERE abc_rat(d.cd_vf, d.datef, d.valute) <> 0;
+    SELECT * FROM emp e WHERE calc_bonus(e.ename, e.hiredate, e.job) <> 0;
 
 If you need a single value as anything but `text`, either cast the result or
 use `oracle_query` with a column definition list, which gives you a properly
 typed result:
 
-    SELECT rating FROM oracle_query('oradb',
-           'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
-           ARRAY['A', '2026-01-01', 'USD']) AS q(rating numeric);
+    SELECT bonus FROM oracle_query('oradb',
+           'SELECT scott.calc_bonus(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3)
+            FROM dual',
+           ARRAY['SMITH', '1980-12-17', 'CLERK']) AS q(bonus numeric);
 
 **oracle_call in detail**
 
