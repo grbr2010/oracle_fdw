@@ -38,6 +38,7 @@
 #include "commands/vacuum.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
+#include "funcapi.h"
 /* for "hash_bytes_extended" or "hash_bytes" */
 #if PG_VERSION_NUM >= 130000
 #include "common/hashfn.h"
@@ -310,12 +311,16 @@ extern PGDLLEXPORT Datum oracle_fdw_validator(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_close_connections(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_diag(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_execute(PG_FUNCTION_ARGS);
+extern PGDLLEXPORT Datum oracle_query(PG_FUNCTION_ARGS);
+extern PGDLLEXPORT Datum oracle_scalar(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(oracle_fdw_handler);
 PG_FUNCTION_INFO_V1(oracle_fdw_validator);
 PG_FUNCTION_INFO_V1(oracle_close_connections);
 PG_FUNCTION_INFO_V1(oracle_diag);
 PG_FUNCTION_INFO_V1(oracle_execute);
+PG_FUNCTION_INFO_V1(oracle_query);
+PG_FUNCTION_INFO_V1(oracle_scalar);
 
 /*
  * on-load initializer
@@ -751,6 +756,214 @@ oracle_execute(PG_FUNCTION_ARGS)
 	pfree(session);
 
 	PG_RETURN_VOID();
+}
+
+/*
+ * parseParamArray
+ * 		Convert the "params" argument (a one-dimensional text array or NULL)
+ * 		into an array of C strings; NULL array elements become NULL pointers.
+ */
+static char **
+parseParamArray(FunctionCallInfo fcinfo, int argno, int *nparams)
+{
+	ArrayType *arr;
+	ArrayIterator iterator;
+	Datum value;
+	bool isnull;
+	int n, i;
+	char **params;
+
+	*nparams = 0;
+	if (PG_ARGISNULL(argno))
+		return NULL;
+
+	arr = PG_GETARG_ARRAYTYPE_P(argno);
+	if (ARR_NDIM(arr) > 1)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("parameter array must be one-dimensional")));
+
+	n = ArrayGetNItems(ARR_NDIM(arr), ARR_DIMS(arr));
+	params = (char **) palloc(n * sizeof(char *));
+
+	iterator = array_create_iterator(arr, 0);
+	i = 0;
+	while (array_iterate(iterator, &value, &isnull))
+		params[i++] = isnull ? NULL : TextDatumGetCString(value);
+	array_free_iterator(iterator);
+
+	*nparams = n;
+	return params;
+}
+
+/*
+ * execDynamic
+ * 		Connect to the foreign server and run a dynamic query.
+ * 		The returned dynResult is allocated in the current memory context,
+ * 		the session is freed (the connection stays cached).
+ */
+static struct dynResult *
+execDynamic(Name srvname, char *stmt, char **params, int nparams)
+{
+	oracleSession *session = oracleConnectServer(srvname);
+	struct dynResult *result;
+
+	PG_TRY();
+	{
+		result = oracleExecDynamic(session, stmt, nparams, params, DEFAULT_PREFETCH);
+	}
+	PG_CATCH();
+	{
+		/* the error may have left the statement open on the cached session */
+		oracleCloseStatement(session);
+		pfree(session);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* free the session (connection will be cached) */
+	pfree(session);
+
+	return result;
+}
+
+/*
+ * oracle_query
+ * 		Execute a query that returns a result on a foreign server and
+ * 		return all result rows.  The result types are taken from the column
+ * 		definition list at the call site, e.g.
+ * 		SELECT * FROM oracle_query('srv', 'SELECT ...') AS t(col1 int, col2 text);
+ * 		Bind parameters are passed as :1, :2, ... in the "params" array.
+ */
+PGDLLEXPORT Datum
+oracle_query(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	HeapTuple *tuples;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("server and statement must not be NULL")));
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		MemoryContext oldctx, execctx;
+		TupleDesc tupdesc;
+		AttInMetadata *attinmeta;
+		char *stmt;
+		char **params;
+		int nparams, c;
+		long r;
+		struct dynResult *result;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldctx = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		/* the result types are taken from the column definition list */
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					errmsg("oracle_query requires a column definition list"),
+					errhint("Specify the result types, e.g. SELECT * FROM oracle_query(...) AS t(col1 numeric, col2 text).")));
+
+		attinmeta = TupleDescGetAttInMetadata(tupdesc);
+
+		stmt = text_to_cstring(PG_GETARG_TEXT_PP(1));
+		params = parseParamArray(fcinfo, 2, &nparams);
+
+		/*
+		 * Run the query in a dedicated memory context (a child of the
+		 * multi-call context) that can be freed once the rows are converted.
+		 */
+		execctx = AllocSetContextCreate(funcctx->multi_call_memory_ctx,
+										"oracle_fdw dynamic query",
+										ALLOCSET_SMALL_SIZES);
+		MemoryContextSwitchTo(execctx);
+
+		PG_TRY();
+		{
+			result = execDynamic(PG_GETARG_NAME(0), stmt, params, nparams);
+		}
+		PG_CATCH();
+		{
+			MemoryContextSwitchTo(oldctx);
+			MemoryContextDelete(execctx);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+		if (result->ncols != tupdesc->natts)
+			ereport(ERROR,
+					(errcode(ERRCODE_DATATYPE_MISMATCH),
+					errmsg("remote query returned %d columns, but the column definition list has %d",
+						   result->ncols, (int)tupdesc->natts)));
+
+		/* convert all rows (the strings are interpreted by the type input functions) */
+		tuples = (HeapTuple *) palloc(result->nrows * sizeof(HeapTuple));
+		for (r=0; r<result->nrows; ++r)
+		{
+			char **cstrs = (char **) palloc(tupdesc->natts * sizeof(char *));
+
+			for (c=0; c<tupdesc->natts; ++c)
+				cstrs[c] = result->values[r][c];
+
+			tuples[r] = BuildTupleFromCStrings(attinmeta, cstrs);
+			pfree(cstrs);
+		}
+
+		funcctx->user_fctx = (void *) tuples;
+		funcctx->max_calls = (uint64) result->nrows;
+
+		/* free the Oracle result (the tuples were copied) */
+		MemoryContextDelete(execctx);
+
+		MemoryContextSwitchTo(oldctx);
+	}
+
+	/* return the tuples one after the other */
+	funcctx = SRF_PERCALL_SETUP();
+	tuples = (HeapTuple *) funcctx->user_fctx;
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuples[funcctx->call_cntr]));
+	else
+		SRF_RETURN_DONE(funcctx);
+}
+
+/*
+ * oracle_scalar
+ * 		Execute a query on a foreign server and return the first column of
+ * 		the first row as text (NULL if the query returned no rows).
+ * 		Typically the statement is a remote function call, e.g.
+ * 		SELECT oracle_scalar('srv', 'SELECT pkg.f(:1, :2) FROM dual', ARRAY[...]);
+ */
+PGDLLEXPORT Datum
+oracle_scalar(PG_FUNCTION_ARGS)
+{
+	Name srvname;
+	char *stmt;
+	int nparams;
+	char **params;
+	struct dynResult *result;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("server and statement must not be NULL")));
+
+	srvname = PG_GETARG_NAME(0);
+	stmt = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	params = parseParamArray(fcinfo, 2, &nparams);
+
+	result = execDynamic(srvname, stmt, params, nparams);
+
+	if (result->nrows == 0 || result->values[0][0] == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(result->values[0][0]));
 }
 
 /*

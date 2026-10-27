@@ -2325,6 +2325,382 @@ oracleExecuteCall(oracleSession *session, char * const stmt)
 }
 
 /*
+ * oracleExecDynamic
+ * 		Execute a query with bind parameters and return all result rows.
+ * 		The parameters are bound as strings to the placeholders :1, :2, ...
+ * 		(the order corresponds to the "params" array; NULL elements are NULL).
+ * 		The result values are returned as NUL-terminated strings (the Oracle
+ * 		server converts them according to the NLS settings of the session),
+ * 		NULL values are NULL pointers.
+ * 		All memory is allocated with oracleAlloc in the current memory context.
+ * 		The statement is closed before returning.
+ */
+struct dynResult *
+oracleExecDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch)
+{
+	OCIParam *colp;
+	OCIDefine *defnhp;
+	sword result;
+	ub4 rowcount;
+	ub4 ncols;
+	int i, c;
+	unsigned int idx;
+	long nrows = 0, nrows_alloc = 100;
+	sb2 *param_ind = NULL;  /* NULL indicators for the bind parameters */
+	char *param_name = NULL;  /* the bind parameter names ":1", ":2", ... */
+	sb2 **ind;  /* array [column][prefetch row] of NULL indicators */
+	ub2 **len;  /* array [column][prefetch row] of value lengths */
+	char **buf;  /* array [column] of prefetch * buffer size result buffers */
+	sb4 *buf_size;  /* buffer size per column */
+	struct dynResult *res;
+
+	/* make sure there is no statement handle stored in "session" */
+	if (session->stmthp != NULL)
+		oracleError(FDW_ERROR, "oracleExecDynamic internal error: statement handle is not NULL");
+
+	session->last_batch = 0;
+
+	/* prepare the query */
+	if (checkerr(
+		OCIStmtPrepare2(session->connp->svchp, &(session->stmthp), session->envp->errhp,
+			(text *)query, (ub4)strlen(query), (text *)NULL, (ub4)0,
+			(ub4) OCI_NTV_SYNTAX, (ub4) OCI_DEFAULT),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing query: OCIStmtPrepare2 failed to prepare remote query",
+			oraMessage);
+	}
+
+	/* register statement handle */
+	registerStmt(session->stmthp, session->envp->envhp, session->connp);
+
+	/* set prefetch options */
+	if (checkerr(
+		OCIAttrSet((dvoid *)session->stmthp, OCI_HTYPE_STMT, (dvoid *)&prefetch, 0,
+			OCI_ATTR_PREFETCH_ROWS, session->envp->errhp),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing query: OCIAttrSet failed to set number of prefetched rows in statement handle",
+			oraMessage);
+	}
+
+	/* bind the parameters */
+	if (nparams > 0)
+	{
+		param_ind = oracleAlloc(nparams * sizeof(sb2));
+		param_name = oracleAlloc((size_t)nparams * 12);
+
+		for (i=0; i<nparams; ++i)
+		{
+			OCIBind *bndhp = NULL;
+			sb4 value_len = (params[i] == NULL) ? 0 : (sb4)strlen(params[i]) + 1;
+
+			param_ind[i] = (params[i] == NULL) ? -1 : 0;
+			sprintf(param_name + (size_t)i * 12, ":%d", i + 1);
+
+			if (checkerr(
+				OCIBindByName(session->stmthp, &bndhp, session->envp->errhp,
+					(text *)(param_name + (size_t)i * 12), (sb4)strlen(param_name + (size_t)i * 12),
+					params[i], value_len, SQLT_STR,
+					(dvoid *)&param_ind[i], NULL, NULL, (ub4)0, NULL, OCI_DEFAULT),
+				(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+			{
+				oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+					"error executing query: OCIBindByName failed to bind parameter",
+					oraMessage);
+			}
+		}
+	}
+
+	/* describe the query to get the select list */
+	if (checkerr(
+		OCIStmtExecute(session->connp->svchp, session->stmthp, session->envp->errhp, (ub4)0, (ub4)0,
+			(CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, OCI_DESCRIBE_ONLY),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error describing query: OCIStmtExecute failed to describe remote query",
+			oraMessage);
+	}
+
+	/* get the number of result columns */
+	if (checkerr(
+		OCIAttrGet((dvoid *)session->stmthp, (ub4)OCI_HTYPE_STMT,
+			(dvoid *)&ncols, (ub4 *)0, (ub4)OCI_ATTR_PARAM_COUNT, session->envp->errhp),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error describing query: OCIAttrGet failed to get number of result columns",
+			oraMessage);
+	}
+
+	if (ncols == 0)
+		oracleError(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"remote statement does not return a result; use oracle_execute for statements without results");
+
+	res = oracleAlloc(sizeof(struct dynResult));
+	res->ncols = (int)ncols;
+	res->nrows = 0;
+	res->colname = oracleAlloc(ncols * sizeof(char *));
+	res->values = oracleAlloc((size_t)nrows_alloc * sizeof(char **));
+
+	ind = oracleAlloc(ncols * sizeof(sb2 *));
+	len = oracleAlloc(ncols * sizeof(ub2 *));
+	buf = oracleAlloc(ncols * sizeof(char *));
+	buf_size = oracleAlloc(ncols * sizeof(sb4));
+
+	/* loop through the select list, define the result values as strings */
+	for (i=1; i<=(int)ncols; ++i)
+	{
+		ub2 ora_type, bin_size = 0;
+		ub1 csfrm = 0;
+		sb2 precision = 0;
+		sb1 scale = 0;
+		ub4 charsize = 0, ident_size;
+		OraText *ident;
+		const ub1 nchar = SQLCS_NCHAR;
+
+		/* get the parameter descriptor for the column */
+		if (checkerr(
+			OCIParamGet((void *)session->stmthp, OCI_HTYPE_STMT, session->envp->errhp,
+				(dvoid **)&colp, i),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error describing query: OCIParamGet failed to get column data",
+				oraMessage);
+		}
+
+		/* get the column name */
+		if (checkerr(
+			OCIAttrGet((dvoid *)colp, OCI_DTYPE_PARAM, (dvoid *)&ident,
+				&ident_size, (ub4)OCI_ATTR_NAME, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error describing query: OCIAttrGet failed to get column name",
+				oraMessage);
+		}
+
+		res->colname[i-1] = copyOraText((const char *)ident, (int)ident_size, 0);
+
+		/* get the column data type */
+		if (checkerr(
+			OCIAttrGet((dvoid *)colp, OCI_DTYPE_PARAM, (dvoid *)&ora_type,
+				(ub4 *)0, (ub4)OCI_ATTR_DATA_TYPE, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error describing query: OCIAttrGet failed to get column type",
+				oraMessage);
+		}
+
+		/* get the character set form */
+		if (checkerr(
+			OCIAttrGet((dvoid *)colp, OCI_DTYPE_PARAM, (dvoid *)&csfrm,
+				(ub4 *)0, (ub4)OCI_ATTR_CHARSET_FORM, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error describing query: OCIAttrGet failed to get character set form",
+				oraMessage);
+		}
+
+		/* get the number of characters for string fields */
+		if (checkerr(
+			OCIAttrGet((dvoid *)colp, OCI_DTYPE_PARAM, (dvoid *)&charsize,
+				(ub4 *)0, (ub4)OCI_ATTR_CHAR_SIZE, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error describing query: OCIAttrGet failed to get column length",
+				oraMessage);
+		}
+
+		/* get the binary length for RAW fields */
+		if (checkerr(
+			OCIAttrGet((dvoid *)colp, OCI_DTYPE_PARAM, (dvoid *)&bin_size,
+				(ub4 *)0, (ub4)OCI_ATTR_DATA_SIZE, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error describing query: OCIAttrGet failed to get column size",
+				oraMessage);
+		}
+
+		/* get the precision */
+		if (checkerr(
+			OCIAttrGet((dvoid *)colp, OCI_DTYPE_PARAM, (dvoid *)&precision,
+				(ub4 *)0, (ub4)OCI_ATTR_PRECISION, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error describing query: OCIAttrGet failed to get column precision",
+				oraMessage);
+		}
+
+		/* get the scale */
+		if (checkerr(
+			OCIAttrGet((dvoid *)colp, OCI_DTYPE_PARAM, (dvoid *)&scale,
+				(ub4 *)0, (ub4)OCI_ATTR_SCALE, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error describing query: OCIAttrGet failed to get column scale",
+				oraMessage);
+		}
+
+		/* determine the buffer size for the string representation */
+		switch (ora_type)
+		{
+			case SQLT_AFC:  /* CHAR(n) */
+			case SQLT_CHR:  /* VARCHAR(n) */
+			case SQLT_VCS:  /* VARCHAR2(n) */
+				buf_size[i-1] = (sb4)charsize * 4 + 1;
+				break;
+			case SQLT_NUM:  /* NUMBER */
+			case SQLT_FLT:  /* FLOAT */
+				/* this should be big enough for unrestricted NUMBERs */
+				buf_size[i-1] = 140;
+				break;
+			case SQLT_IBFLOAT:  /* BINARY_FLOAT */
+				buf_size[i-1] = 42;
+				break;
+			case SQLT_IBDOUBLE:  /* BINARY_DOUBLE */
+				buf_size[i-1] = 310;
+				break;
+			case SQLT_DAT:  /* DATE */
+				buf_size[i-1] = 23;
+				break;
+			case SQLT_TIMESTAMP:
+				buf_size[i-1] = 34;
+				break;
+			case SQLT_TIMESTAMP_TZ:
+			case SQLT_TIMESTAMP_LTZ:
+				buf_size[i-1] = 40;
+				break;
+			case SQLT_INTERVAL_YM:
+				buf_size[i-1] = (sb4)precision + 5;
+				break;
+			case SQLT_INTERVAL_DS:
+				buf_size[i-1] = (sb4)precision + (sb4)scale + 12;
+				break;
+			case SQLT_BIN:  /* RAW(n) */
+				buf_size[i-1] = (sb4)bin_size * 2 + 1;
+				break;
+			default:
+				oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
+					"column %s in the remote query has a data type that cannot be converted",
+					res->colname[i-1],
+					"use CAST or TO_CHAR to convert the column to a supported type (VARCHAR2, NUMBER, DATE, TIMESTAMP, ...)");
+		}
+
+		/* allocate the result buffers for "prefetch" rows */
+		buf[i-1] = oracleAlloc((size_t)prefetch * buf_size[i-1]);
+		ind[i-1] = oracleAlloc(prefetch * sizeof(sb2));
+		len[i-1] = oracleAlloc(prefetch * sizeof(ub2));
+
+		/* define the result value */
+		defnhp = NULL;
+		if (checkerr(
+			OCIDefineByPos(session->stmthp, &defnhp, session->envp->errhp, (ub4)i,
+				(dvoid *)buf[i-1], buf_size[i-1], SQLT_STR,
+				(dvoid *)ind[i-1], len[i-1], NULL, OCI_DEFAULT),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error executing query: OCIDefineByPos failed to define result value",
+				oraMessage);
+		}
+
+		/*
+		 * Use the more expensive character set conversion only if requested
+		 * and only for columns with a national character set.
+		 */
+		if (session->have_nchar && csfrm == SQLCS_NCHAR
+			&& checkerr(
+				OCIAttrSet((void *)defnhp, OCI_HTYPE_DEFINE, (void *)&nchar, 0,
+					OCI_ATTR_CHARSET_FORM, session->envp->errhp),
+				(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error executing query: OCIAttrSet failed to set charset form on result value",
+				oraMessage);
+		}
+	}
+
+	/* execute the query and fetch the first "prefetch" rows */
+	result = checkerr(
+		OCIStmtExecute(session->connp->svchp, session->stmthp, session->envp->errhp, (ub4)prefetch, (ub4)0,
+			(CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, OCI_DEFAULT),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR);
+
+	if (result != OCI_SUCCESS && result != OCI_NO_DATA)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing query: OCIStmtExecute failed to execute remote query",
+			oraMessage);
+	}
+
+	/* get the number of rows fetched */
+	if (checkerr(
+		OCIAttrGet((dvoid *)session->stmthp, (ub4)OCI_HTYPE_STMT,
+			(dvoid *)&rowcount, (ub4 *)0,
+			(ub4)OCI_ATTR_ROW_COUNT, session->envp->errhp),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing query: OCIAttrGet failed to get number of fetched rows",
+			oraMessage);
+	}
+
+	session->last_batch = (result == OCI_NO_DATA);
+	session->fetched_rows = (unsigned int)rowcount;
+	session->current_row = 0;
+
+	/* fetch all result rows */
+	while ((idx = oracleFetchNext(session, prefetch)) != 0)
+	{
+		unsigned int r = idx - 1;
+
+		if (nrows == nrows_alloc)
+		{
+			nrows_alloc *= 2;
+			res->values = oracleRealloc(res->values, (size_t)nrows_alloc * sizeof(char **));
+		}
+
+		res->values[nrows] = oracleAlloc(ncols * sizeof(char *));
+
+		for (c=0; c<(int)ncols; ++c)
+		{
+			if (ind[c][r] == -1)
+			{
+				res->values[nrows][c] = NULL;
+			}
+			else
+			{
+				char *value = oracleAlloc((size_t)len[c][r] + 1);
+
+				memcpy(value, buf[c] + (size_t)r * buf_size[c], len[c][r]);
+				value[len[c][r]] = '\0';
+				res->values[nrows][c] = value;
+			}
+		}
+
+		++nrows;
+	}
+
+	res->nrows = nrows;
+
+	/* close the statement (the connection will be cached) */
+	oracleCloseStatement(session);
+
+	return res;
+}
+
+/*
  * oracleGetLob
  * 		Get the LOB contents and store them in *value and *value_len.
  */

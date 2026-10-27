@@ -10,6 +10,10 @@ Version 2.10.0
   - Add a CI workflow that automatically tests new commits against PostgreSQL
     v18 and both Oracle server 21/client 19 and Oracle server 23/client 23.
     Patch by Ziming Zhang.
+  - Add the functions oracle_query and oracle_scalar that execute a query with
+    bind parameters on the Oracle server and return the result to PostgreSQL,
+    so that remote functions and package procedures can be called from
+    PostgreSQL like Oracle database link calls.
 
 Version 2.9.0, released 2026-06-08
 

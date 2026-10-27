@@ -1011,3 +1011,54 @@ SELECT * FROM b;
 (2 rows)
 
 ROLLBACK;
+
+/* test oracle_scalar and oracle_query */
+
+SELECT oracle_scalar('oracle', 'SELECT 42 FROM dual');
+ oracle_scalar 
+---------------
+ 42
+(1 row)
+
+SELECT oracle_scalar('oracle', 'SELECT :1 || :2 FROM dual', ARRAY['foo', 'bar']);
+ oracle_scalar 
+---------------
+ foobar
+(1 row)
+
+SELECT oracle_scalar('oracle', 'SELECT CASE WHEN :1 IS NULL THEN ''is null'' ELSE ''is not null'' END FROM dual', ARRAY[NULL::text]);
+ oracle_scalar 
+---------------
+ is null
+(1 row)
+
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual WHERE 1 = 0');
+ oracle_scalar 
+---------------
+ 
+(1 row)
+
+SELECT * FROM oracle_query('oracle', 'SELECT level, ''row'' || level FROM dual CONNECT BY level <= 3') AS q(n numeric, s text);
+ n |  s   
+---+-----
+ 1 | row1
+ 2 | row2
+ 3 | row3
+(3 rows)
+
+SELECT count(*) FROM oracle_query('oracle', 'SELECT 1 FROM dual WHERE 1 = 0') AS q(n numeric);
+ count 
+-------
+     0
+(1 row)
+
+-- the number of result columns must match the column definition list
+SELECT * FROM oracle_query('oracle', 'SELECT 1, 2 FROM dual') AS q(n numeric);
+ERROR:  remote query returned 2 columns, but the column definition list has 1
+-- statements that do not return a result are rejected
+SELECT * FROM oracle_query('oracle', 'DELETE FROM typetest1 WHERE 1 = 0') AS q(n numeric);
+ERROR:  remote statement does not return a result; use oracle_execute for statements without results
+-- remote errors are reported
+SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);
+ERROR:  error describing query: OCIStmtExecute failed to describe remote query
+DETAIL:  ORA-00942: table or view does not exist
