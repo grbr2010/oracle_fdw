@@ -590,6 +590,9 @@ oracleSession
 /*
  * oracleCloseStatement
  * 		Close the current statement associated with the session.
+ * 		The statement may already have been closed by oracleEndTransaction
+ * 		(e.g. when a memory context callback runs at the end of the
+ * 		transaction), in which case there is nothing to do.
  */
 void
 oracleCloseStatement(oracleSession *session)
@@ -597,7 +600,16 @@ oracleCloseStatement(oracleSession *session)
 	/* free statement handle, if it exists */
 	if (session->stmthp != NULL)
 	{
-		freeStmt(session->stmthp, session->connp, session->envp->errhp);
+		struct stmtHandleEntry *entry;
+
+		/* only free the statement if it is still registered */
+		for (entry = session->connp->stmtlist; entry != NULL; entry = entry->next)
+			if (entry->stmthp == session->stmthp)
+				break;
+
+		if (entry != NULL)
+			freeStmt(session->stmthp, session->connp, session->envp->errhp);
+
 		session->stmthp = NULL;
 	}
 }
@@ -2531,15 +2543,24 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 	/* register statement handle */
 	registerStmt(session->stmthp, session->envp->envhp, session->connp);
 
-	/* set prefetch options */
-	if (checkerr(
-		OCIAttrSet((dvoid *)session->stmthp, OCI_HTYPE_STMT, (dvoid *)&prefetch, 0,
-			OCI_ATTR_PREFETCH_ROWS, session->envp->errhp),
-		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	/*
+	 * Fetch at most one row when the statement is executed; the prefetch size
+	 * for the batches fetched by oracleFetchDynamic is set in
+	 * oracleStartDynamic, so that the remote server only has to evaluate the
+	 * first row for the execution.
+	 */
 	{
-		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
-			"error executing query: OCIAttrSet failed to set number of prefetched rows in statement handle",
-			oraMessage);
+		unsigned int one = 1;
+
+		if (checkerr(
+			OCIAttrSet((dvoid *)session->stmthp, OCI_HTYPE_STMT, (dvoid *)&one, 0,
+				OCI_ATTR_PREFETCH_ROWS, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error executing query: OCIAttrSet failed to set number of prefetched rows in statement handle",
+				oraMessage);
+		}
 	}
 
 	/*
@@ -2849,17 +2870,18 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 /*
  * oracleStartDynamic
  * 		Execute a query prepared with oraclePrepareDynamic and fetch the
- * 		first "prefetch" rows.
+ * 		first row; subsequent rows are fetched by oracleFetchDynamic.
  */
 void
 oracleStartDynamic(oracleSession *session, struct dynState *state)
 {
 	sword result;
+	ub4 rowcount;
+	unsigned int prefetch = (unsigned int)state->prefetch;
 
 	/*
-	 * Execute the query without fetching any rows; the rows are fetched by
-	 * oracleFetchDynamic, so that the remote server only has to evaluate the
-	 * rows that are actually needed.
+	 * Execute the query; the OCI prefetch size of 1 makes the remote server
+	 * evaluate only the first row.
 	 */
 	result = checkerr(
 		OCIStmtExecute(session->connp->svchp, session->stmthp, session->envp->errhp, (ub4)0, (ub4)0,
@@ -2873,8 +2895,31 @@ oracleStartDynamic(oracleSession *session, struct dynState *state)
 			oraMessage);
 	}
 
+	/* get the number of rows fetched so far */
+	if (checkerr(
+		OCIAttrGet((dvoid *)session->stmthp, (ub4)OCI_HTYPE_STMT,
+			(dvoid *)&rowcount, (ub4 *)0,
+			(ub4)OCI_ATTR_ROW_COUNT, session->envp->errhp),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing query: OCIAttrGet failed to get number of fetched rows",
+			oraMessage);
+	}
+
+	/* enable prefetching for the batches fetched by oracleFetchDynamic */
+	if (checkerr(
+		OCIAttrSet((dvoid *)session->stmthp, OCI_HTYPE_STMT, (dvoid *)&prefetch, 0,
+			OCI_ATTR_PREFETCH_ROWS, session->envp->errhp),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing query: OCIAttrSet failed to set number of prefetched rows in statement handle",
+			oraMessage);
+	}
+
 	session->last_batch = (result == OCI_NO_DATA);
-	session->fetched_rows = 0;
+	session->fetched_rows = (unsigned int)rowcount;
 	session->current_row = 0;
 }
 
@@ -2891,7 +2936,13 @@ oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values
 	unsigned int idx, r;
 	int c;
 
-	idx = oracleFetchNext(session, state->prefetch);
+	/*
+	 * Fetch a single row the first time, so that a consumer that stops after
+	 * the first row does not make the remote server evaluate more rows; the
+	 * remaining rows are fetched in batches of the prefetch size.
+	 */
+	idx = oracleFetchNext(session,
+		(session->fetched_rows == 0 && session->current_row == 0) ? 1 : state->prefetch);
 
 	if (idx == 0)
 		return 0;
@@ -2968,52 +3019,6 @@ oracleColIsRaw(struct dynState *state, int col)
 	return state->coltype[col] == SQLT_BIN;
 }
 
-/*
- * oracleExecDynamic
- * 		Execute a query with bind parameters and return all result rows.
- * 		The result values are returned as NUL-terminated strings (the Oracle
- * 		server converts them according to the NLS settings of the session),
- * 		NULL values are NULL pointers.
- * 		All memory is allocated with oracleAlloc in the current memory context.
- * 		The statement is closed before returning.
- */
-struct dynResult *
-oracleExecDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch)
-{
-	struct dynState *state = oraclePrepareDynamic(session, query, nparams, params, prefetch, 0);
-	struct dynResult *res;
-	char **values;
-	long nrows_alloc = 100;
-
-	res = oracleAlloc(sizeof(struct dynResult));
-	res->ncols = state->ncols;
-	res->nrows = 0;
-	res->colname = NULL;
-	res->values = oracleAlloc((size_t)nrows_alloc * sizeof(char **));
-
-	values = oracleAlloc((size_t)state->ndef * sizeof(char *));
-
-	oracleStartDynamic(session, state);
-
-	/* fetch all result rows */
-	while (oracleFetchDynamic(session, state, values))
-	{
-		if (res->nrows == nrows_alloc)
-		{
-			nrows_alloc *= 2;
-			res->values = oracleRealloc(res->values, (size_t)nrows_alloc * sizeof(char **));
-		}
-
-		res->values[res->nrows] = oracleAlloc((size_t)state->ndef * sizeof(char *));
-		memcpy(res->values[res->nrows], values, (size_t)state->ndef * sizeof(char *));
-
-		++res->nrows;
-	}
-
-	oracleCloseDynamic(session, state);
-
-	return res;
-}
 
 /*
  * oracleGetLob

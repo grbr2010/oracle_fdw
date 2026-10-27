@@ -707,6 +707,15 @@ SELECT oracle_scalar('oracle', 'SELECT 2 /* :1 */ FROM dual');
 SELECT oracle_scalar('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END FROM dual CONNECT BY level <= 2');
 SELECT oracle_scalar('oracle', 'SELECT 42, TO_CLOB(''x'') FROM dual');
 SELECT oracle_scalar('oracle', 'SELECT NULL FROM dual');
+-- oracle_query streams the rows into a spilling tuplestore; the whole result
+-- is read, but the remote cursor is closed when the query is done or aborted
+SELECT * FROM oracle_query('oracle', 'SELECT level n FROM dual CONNECT BY level <= 5') AS q(n numeric) LIMIT 1;
+SELECT oracle_scalar('oracle', 'SELECT 99 FROM dual');
+-- the column definition list is checked before the statement is executed
+SELECT * FROM oracle_query('oracle', 'SELECT 1, 1/0 FROM dual') AS q(a numeric);
+-- an error during the fetch is reported and leaves the session usable
+SELECT * FROM oracle_query('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END n FROM dual CONNECT BY level <= 2') AS q(n numeric);
+SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
 
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');

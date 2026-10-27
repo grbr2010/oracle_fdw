@@ -15,6 +15,11 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+/* portable equivalents of the OCI types sb2, ub2 and sb4 (see oci.h) */
+typedef int16_t ora_sb2;
+typedef uint16_t ora_ub2;
+typedef int32_t ora_sb4;
+
 /* oracle_fdw version */
 #define ORACLE_FDW_VERSION "2.10.0devel"
 
@@ -71,6 +76,8 @@ struct oracleSession
 	unsigned int fetched_rows;
 	unsigned int current_row;  /* first row is 1 */
 };
+#endif
+typedef struct oracleSession oracleSession;
 
 /*
  * Execution state of a dynamic query prepared with oraclePrepareDynamic.
@@ -79,18 +86,17 @@ struct oracleSession
  */
 struct dynState
 {
-	int ncols;      /* number of result columns */
-	int ndef;       /* number of result columns that are defined */
-	int prefetch;   /* number of rows fetched at once */
-	char **colname; /* array [ndef] of column names */
-	int *coltype;   /* array [ndef] of the Oracle data types of the columns */
-	sb2 **ind;      /* array [ndef][prefetch row] of NULL indicators */
-	ub2 **len;      /* array [ndef][prefetch row] of value lengths */
-	char **buf;     /* array [ndef] of prefetch * buffer size result buffers */
-	sb4 *buf_size;  /* buffer size per defined column */
+	int ncols;       /* number of result columns */
+	int ndef;        /* number of result columns that are defined */
+	int prefetch;    /* number of rows fetched at once */
+	char **colname;  /* array [ndef] of column names */
+	int *coltype;    /* array [ndef] of the Oracle data types of the columns */
+	ora_sb2 **ind;   /* array [ndef][prefetch row] of NULL indicators */
+	ora_ub2 **len;   /* array [ndef][prefetch row] of value lengths */
+	char **buf;      /* array [ndef] of prefetch * buffer size result buffers */
+	ora_sb4 *buf_size;  /* buffer size per defined column */
 };
-#endif
-typedef struct oracleSession oracleSession;
+
 typedef struct dynState dynState;
 
 /* types for the Oracle table description */
@@ -186,19 +192,6 @@ struct paramDesc
 	struct paramDesc *next;
 };
 
-/*
- * Result of a dynamic query executed with oracleExecDynamic.
- * All the memory is allocated with oracleAlloc in the current memory context;
- * it is the caller's responsibility to use a context that lives long enough.
- */
-struct dynResult
-{
-	int ncols;       /* number of result columns */
-	char **colname;  /* column names */
-	long nrows;      /* number of result rows */
-	char ***values;  /* values[row][column], NULL for NULL values */
-};
-
 /* PostgreSQL error messages we need */
 typedef enum
 {
@@ -253,7 +246,6 @@ extern void oraclePrepareQuery(oracleSession *session, const char *query, const 
 extern unsigned int oracleExecuteQuery(oracleSession *session, const struct oraTable *oraTable, struct paramDesc *paramList, unsigned int prefetch);
 extern unsigned int oracleFetchNext(oracleSession *session, unsigned int prefetch);
 extern void oracleExecuteCall(oracleSession *session, char * const stmt);
-extern struct dynResult *oracleExecDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch);
 extern struct dynState *oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch, int define_cols);
 extern void oracleStartDynamic(oracleSession *session, struct dynState *state);
 extern int oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values);
