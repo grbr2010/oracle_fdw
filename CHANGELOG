@@ -5,6 +5,12 @@ Version 2.10.0
     If the tables have different column layouts, this could cause the error
       cache lookup failed for function 0
     Patch by Ziming Zhang.
+  - Fix rollback to savepoint when the first Oracle call of a transaction
+    happens inside a subtransaction; previously remote DML executed there
+    survived the subtransaction abort.
+  - Fix RAW columns in oracle_query: declaring the result column as bytea
+    returned the hex representation as ASCII characters instead of the
+    binary data.
 
   Enhancements:
   - Add a CI workflow that automatically tests new commits against PostgreSQL
@@ -12,8 +18,29 @@ Version 2.10.0
     Patch by Ziming Zhang.
   - Add the functions oracle_query and oracle_scalar that execute a query with
     bind parameters on the Oracle server and return the result to PostgreSQL,
-    so that remote functions and package procedures can be called from
+    so that remote functions and package functions can be called from
     PostgreSQL like Oracle database link calls.
+    oracle_query streams the result into a spilling tuplestore, so memory use
+    stays bounded and the fetch can be canceled, and oracle_scalar reads only
+    the first row and the first column of the result.
+  - Add the functions oracle_call and oracle_exec that call remote functions
+    that modify data and remote procedures with OUT parameters through an
+    anonymous PL/SQL block, which a query cannot do.
+    All four functions are revoked from PUBLIC, since they execute arbitrary
+    SQL on the Oracle server with the user mapping's credentials.
+  - Reject statements that do not return a result based on the statement type
+    reported by OCI, so that lowercase keywords, leading whitespace and
+    comments are accepted, and DML and PL/SQL blocks are rejected before they
+    are described.
+  - Verify that the bind placeholders :1, :2, ... in a dynamic statement are
+    positional, consecutive and match the number of parameters, reporting a
+    useful error instead of ORA-01008 or ORA-01036.
+  - Report a truncated remote value (a negative result indicator below -1)
+    instead of silently returning incomplete data.
+  - Add a HINT that points to oracle_call when a query calls a remote
+    function that modifies data (ORA-14551).
+  - Require PostgreSQL 15 or better, since PostgreSQL 14 support ended in
+    November 2026.
 
 Version 2.9.0, released 2026-06-08
 
