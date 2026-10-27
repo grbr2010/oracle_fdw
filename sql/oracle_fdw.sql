@@ -719,6 +719,25 @@ SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
 -- RAW columns are transferred as hex; as bytea they need the "\x" prefix
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r bytea);
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r text);
+-- data types and Unicode in the select list (TIMESTAMPTZ is declared text
+-- because its rendering depends on the session time zone)
+SELECT * FROM oracle_query('oracle',
+       'SELECT DATE ''2026-01-02'' d,
+               TIMESTAMP ''2026-01-02 03:04:05'' ts,
+               TIMESTAMP ''2026-01-02 03:04:05 +03:00'' tstz,
+               INTERVAL ''1 02:03:04'' DAY TO SECOND iv,
+               UNISTR(''hello\044B'') u
+        FROM dual') AS q(d date, ts timestamp, tstz text, iv interval, u text);
+-- PL/pgSQL wrapper around oracle_scalar
+DO
+$$DECLARE
+   n numeric;
+BEGIN
+   SELECT oracle_scalar('oracle', 'SELECT 42 FROM dual') INTO n;
+   IF n <> 42 THEN
+      RAISE EXCEPTION 'wrong value %', n;
+   END IF;
+END$$;
 
 /* test oracle_call and oracle_exec calling remote functions that a query cannot call */
 

@@ -1190,6 +1190,30 @@ SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS
  4142
 (1 row)
 
+-- data types and Unicode in the select list (TIMESTAMPTZ is declared text
+-- because its rendering depends on the session time zone)
+SELECT * FROM oracle_query('oracle',
+       'SELECT DATE ''2026-01-02'' d,
+               TIMESTAMP ''2026-01-02 03:04:05'' ts,
+               TIMESTAMP ''2026-01-02 03:04:05 +03:00'' tstz,
+               INTERVAL ''1 02:03:04'' DAY TO SECOND iv,
+               UNISTR(''hello\044B'') u
+        FROM dual') AS q(d date, ts timestamp, tstz text, iv interval, u text);
+     d      |            ts            |                  tstz                  |              iv               |   u    
+------------+--------------------------+----------------------------------------+-------------------------------+--------
+ 01-02-2026 | Fri Jan 02 03:04:05 2026 | 2026-01-02 03:04:05.000000000+03:00 AD | @ 1 day 2 hours 3 mins 4 secs | helloы
+(1 row)
+
+-- PL/pgSQL wrapper around oracle_scalar
+DO
+$$DECLARE
+   n numeric;
+BEGIN
+   SELECT oracle_scalar('oracle', 'SELECT 42 FROM dual') INTO n;
+   IF n <> 42 THEN
+      RAISE EXCEPTION 'wrong value %', n;
+   END IF;
+END$$;
 /* test oracle_call and oracle_exec calling remote functions that a query cannot call */
 -- create remote objects for the tests; drop leftovers from aborted runs
 DO
