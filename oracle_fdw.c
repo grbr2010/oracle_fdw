@@ -928,7 +928,12 @@ oracle_query(PG_FUNCTION_ARGS)
 	tuples = (HeapTuple *) funcctx->user_fctx;
 
 	if (funcctx->call_cntr < funcctx->max_calls)
-		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuples[funcctx->call_cntr]));
+	{
+		/* compute the result first: SRF_RETURN_NEXT increments call_cntr */
+		Datum result = HeapTupleGetDatum(tuples[funcctx->call_cntr]);
+
+		SRF_RETURN_NEXT(funcctx, result);
+	}
 	else
 		SRF_RETURN_DONE(funcctx);
 }

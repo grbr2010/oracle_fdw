@@ -2414,9 +2414,17 @@ oracleExecDynamic(oracleSession *session, const char *query, int nparams, char *
 		}
 	}
 
+	/*
+	 * Only queries have a select list that can be described; OCI_DESCRIBE_ONLY
+	 * fails with ORA-24333 for DML and DDL statements, so reject them right away.
+	 */
+	if (strncmp(query, "SELECT", 6) != 0 && strncmp(query, "WITH", 4) != 0)
+		oracleError(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"remote statement does not return a result; use oracle_execute for statements without results");
+
 	/* describe the query to get the select list */
 	if (checkerr(
-		OCIStmtExecute(session->connp->svchp, session->stmthp, session->envp->errhp, (ub4)0, (ub4)0,
+		OCIStmtExecute(session->connp->svchp, session->stmthp, session->envp->errhp, (ub4)1, (ub4)0,
 			(CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, OCI_DESCRIBE_ONLY),
 		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
 	{
