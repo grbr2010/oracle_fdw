@@ -1174,6 +1174,7 @@ ERROR:  remote query returned 2 columns, but the column definition list has 1
 SELECT * FROM oracle_query('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END n FROM dual CONNECT BY level <= 2') AS q(n numeric);
 ERROR:  error fetching result: OCIStmtFetch2 failed to fetch next result rows
 DETAIL:  ORA-01476: divisor is equal to zero
+Help: https://docs.oracle.com/error-help/db/ora-01476/
 SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
  oracle_scalar 
 ---------------
@@ -1288,8 +1289,8 @@ ERROR:  the number of bind variables in the PL/SQL block (1) does not match the 
 SELECT oracle_scalar('oracle', 'SELECT scott.f_dml(:1) FROM dual', ARRAY['q']);
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query
 DETAIL:  ORA-14551: cannot perform a DML operation inside a query 
-Help: https://docs.oracle.com/error-help/db/ora-14551/
 ORA-06512: at "SCOTT.F_DML", line 3
+Help: https://docs.oracle.com/error-help/db/ora-14551/
 HINT:  use oracle_call to call functions that modify data
 -- invalid function names are rejected
 SELECT oracle_call('oracle', 'scott."f_dml"', 'x');
@@ -1339,7 +1340,8 @@ ERROR:  remote statement is not a query; use oracle_execute or oracle_exec for s
 -- remote errors are reported
 SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);
 ERROR:  error describing query: OCIStmtExecute failed to describe remote query
-DETAIL:  ORA-00942: table or view does not exist
+DETAIL:  ORA-00942: table or view "SCOTT"."NOSUCHTABLE" does not exist
+Help: https://docs.oracle.com/error-help/db/ora-00942/
 SELECT oracle_execute('oracle', 'DROP PACKAGE scott.testpkg');
  oracle_execute 
 ----------------
