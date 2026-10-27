@@ -313,6 +313,8 @@ extern PGDLLEXPORT Datum oracle_diag(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_execute(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_query(PG_FUNCTION_ARGS);
 extern PGDLLEXPORT Datum oracle_scalar(PG_FUNCTION_ARGS);
+extern PGDLLEXPORT Datum oracle_call(PG_FUNCTION_ARGS);
+extern PGDLLEXPORT Datum oracle_exec(PG_FUNCTION_ARGS);
 
 PG_FUNCTION_INFO_V1(oracle_fdw_handler);
 PG_FUNCTION_INFO_V1(oracle_fdw_validator);
@@ -321,6 +323,8 @@ PG_FUNCTION_INFO_V1(oracle_diag);
 PG_FUNCTION_INFO_V1(oracle_execute);
 PG_FUNCTION_INFO_V1(oracle_query);
 PG_FUNCTION_INFO_V1(oracle_scalar);
+PG_FUNCTION_INFO_V1(oracle_call);
+PG_FUNCTION_INFO_V1(oracle_exec);
 
 /*
  * on-load initializer
@@ -1037,6 +1041,185 @@ oracle_scalar(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_TEXT_P(result);
+}
+
+/*
+ * oracle_call
+ * 		Call a remote function that may modify data and return its result
+ * 		as text.  The function is called with the anonymous PL/SQL block
+ * 		BEGIN :p0 := func(:p1, :p2, ...); END;
+ * 		where the result is returned through the OUT bind :p0.
+ * 		The function name consists of 1 to 3 identifier segments
+ * 		(schema.package.function); quoted identifiers and overloaded
+ * 		functions must be called with oracle_exec.
+ * 		SELECT oracle_call('srv', 'pkg.func', 'a', 'b');
+ */
+PGDLLEXPORT Datum
+oracle_call(PG_FUNCTION_ARGS)
+{
+	Name srvname;
+	char *func;
+	int nargs;
+	char **args;
+	oracleSession *session;
+	StringInfoData buf;
+	char *result;
+	int major, minor, update, patch, port_patch;
+	int maxlen, segments, i;
+	const char *p;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("server and function must not be NULL")));
+
+	srvname = PG_GETARG_NAME(0);
+	func = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	args = parseParamArray(fcinfo, 2, &nargs);
+
+	session = oracleConnectServer(srvname);
+
+	/* get the remote server version for the identifier length limit */
+	oracleServerVersion(session, &major, &minor, &update, &patch, &port_patch);
+
+	/* Oracle limits identifier names to 30 bytes before 12.2, then 128 */
+	maxlen = (major > 12 || (major == 12 && minor >= 2)) ? 128 : 30;
+
+	/* the function name must consist of one to three identifier segments */
+	p = func;
+	segments = 0;
+	while (*p != '\0')
+	{
+		int len = 0;
+
+		if (segments)
+		{
+			if (*p != '.')
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_NAME),
+						errmsg("invalid function name \"%s\": expected \".\" between name segments", func),
+						errhint("use oracle_exec to call functions with quoted names")));
+			++p;
+		}
+
+		if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || *p == '_'))
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_NAME),
+					errmsg("invalid function name \"%s\": name segments must be unquoted identifiers", func),
+					errhint("use oracle_exec to call functions with quoted names")));
+		while (*++p != '\0'
+			&& ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+				|| (*p >= '0' && *p <= '9') || *p == '_' || *p == '$' || *p == '#'))
+			++len;
+
+		if (++len > maxlen)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_NAME),
+					errmsg("invalid function name \"%s\": name segments must not be longer than %d bytes", func, maxlen),
+					errhint("use oracle_exec to call functions with long names")));
+
+		++segments;
+	}
+
+	if (segments == 0 || segments > 3)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_NAME),
+				errmsg("invalid function name \"%s\": expected 1 to 3 name segments", func),
+				errhint("use oracle_exec to call functions that need a more complex name")));
+
+	/* construct the PL/SQL block */
+	initStringInfo(&buf);
+	appendStringInfo(&buf, "BEGIN :p0 := %s(", func);
+	for (i=0; i<nargs; ++i)
+		appendStringInfo(&buf, "%s:p%d", i ? ", " : "", i + 1);
+	appendStringInfoString(&buf, "); END;");
+
+	PG_TRY();
+	{
+		result = oracleCallFunction(session, buf.data, nargs, args);
+	}
+	PG_CATCH();
+	{
+		/* the error may have left the statement open on the cached session */
+		oracleCloseStatement(session);
+		pfree(session);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* free the session (connection will be cached) */
+	pfree(session);
+
+	if (result == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(result));
+}
+
+/*
+ * oracle_exec
+ * 		Execute an anonymous PL/SQL block that returns a result and return
+ * 		it as text.  The block must assign its result to the bind parameter
+ * 		:p0; the arguments are bound to the placeholders :p1, :p2, ...
+ * 		SELECT oracle_exec('srv', 'BEGIN proc(:p1, :p0); END;', 'x');
+ * 		Use oracle_execute for blocks that return no result.
+ */
+PGDLLEXPORT Datum
+oracle_exec(PG_FUNCTION_ARGS)
+{
+	Name srvname;
+	char *block;
+	int nargs;
+	char **args;
+	oracleSession *session;
+	char *result;
+	int maxpl, nocc;
+
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("server and block must not be NULL")));
+
+	srvname = PG_GETARG_NAME(0);
+	block = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	args = parseParamArray(fcinfo, 2, &nargs);
+
+	/* the block must assign its result to :p0 and use :p1 ... :pN */
+	maxpl = oracleCheckPlaceholders(block, 0, nargs + 1, 1, &nocc);
+
+	if (maxpl < 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				errmsg("the PL/SQL block does not assign a value to the bind placeholder :p0"),
+				errhint("use oracle_execute to execute a block that returns no result")));
+
+	if (maxpl != nargs)
+		oracleError_ii(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"the number of bind variables in the PL/SQL block (%d) does not match the number of parameters (%d)",
+			maxpl, nargs);
+
+	session = oracleConnectServer(srvname);
+
+	PG_TRY();
+	{
+		result = oracleCallFunction(session, block, nargs, args);
+	}
+	PG_CATCH();
+	{
+		/* the error may have left the statement open on the cached session */
+		oracleCloseStatement(session);
+		pfree(session);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* free the session (connection will be cached) */
+	pfree(session);
+
+	if (result == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(result));
 }
 
 /*

@@ -2350,6 +2350,118 @@ oracleExecuteCall(oracleSession *session, char * const stmt)
 }
 
 /*
+ * oracleCallFunction
+ * 		Execute an anonymous PL/SQL block that has one output bind ":p0"
+ * 		(a string of up to 32767 bytes) and "nargs" input binds ":p1" to
+ * 		":pN" (NULL array elements are SQL NULL).
+ * 		Returns the value of ":p0" (allocated with oracleAlloc in the
+ * 		current memory context; NULL for SQL NULL), the statement is closed
+ * 		before returning.  The caller has to validate the bind placeholders
+ * 		in the block with oracleCheckPlaceholders.
+ */
+char *
+oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args)
+{
+	OCIBind *bndhp = NULL;
+	sb2 out_ind = 0;
+	ub2 out_len = 0;
+	sb2 *in_ind = NULL;
+	char *outbuf;
+	char *result;
+	int i;
+
+	/* make sure there is no statement handle stored in "session" */
+	if (session->stmthp != NULL)
+		oracleError(FDW_ERROR, "oracleCallFunction internal error: statement handle is not NULL");
+
+	/* prepare the block */
+	if (checkerr(
+		OCIStmtPrepare2(session->connp->svchp, &(session->stmthp), session->envp->errhp,
+			(text *)block, (ub4)strlen(block), (text *)NULL, (ub4)0,
+			(ub4) OCI_NTV_SYNTAX, (ub4) OCI_DEFAULT),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing statement: OCIStmtPrepare2 failed to prepare PL/SQL block",
+			oraMessage);
+	}
+
+	/* register statement handle */
+	registerStmt(session->stmthp, session->envp->envhp, session->connp);
+
+	/* bind the output parameter :p0 (PL/SQL VARCHAR2 can hold 32767 bytes) */
+	outbuf = oracleAlloc(32768);
+	if (checkerr(
+		OCIBindByName(session->stmthp, &bndhp, session->envp->errhp,
+			(text *)":p0", (sb4)3,
+			outbuf, 32768, SQLT_STR,
+			(dvoid *)&out_ind, &out_len, NULL, (ub4)0, NULL, OCI_DEFAULT),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing statement: OCIBindByName failed to bind output parameter",
+			oraMessage);
+	}
+
+	/* bind the input parameters :p1 ... :pN */
+	if (nargs > 0)
+		in_ind = oracleAlloc(nargs * sizeof(sb2));
+
+	for (i=0; i<nargs; ++i)
+	{
+		char name[12];
+		sb4 value_len = (args[i] == NULL) ? 0 : (sb4)strlen(args[i]) + 1;
+
+		in_ind[i] = (args[i] == NULL) ? -1 : 0;
+		snprintf(name, sizeof(name), ":p%d", i + 1);
+
+		if (checkerr(
+			OCIBindByName(session->stmthp, &bndhp, session->envp->errhp,
+				(text *)name, (sb4)strlen(name),
+				args[i], value_len, SQLT_STR,
+				(dvoid *)&in_ind[i], NULL, NULL, (ub4)0, NULL, OCI_DEFAULT),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error executing statement: OCIBindByName failed to bind parameter",
+				oraMessage);
+		}
+	}
+
+	/* execute the block */
+	if (checkerr(
+		OCIStmtExecute(session->connp->svchp, session->stmthp, session->envp->errhp, (ub4)1, (ub4)0,
+			(CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, OCI_DEFAULT),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing statement: OCIStmtExecute failed to execute PL/SQL block",
+			oraMessage);
+	}
+
+	/* get the result from :p0 */
+	if (out_ind == -1)
+	{
+		result = NULL;
+	}
+	else
+	{
+		if (out_ind < -1)
+			oracleError(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"the result of the PL/SQL block was truncated on the remote server");
+
+		result = oracleAlloc((size_t)out_len + 1);
+		memcpy(result, outbuf, out_len);
+		result[out_len] = '\0';
+	}
+
+	/* close the statement (the connection will be cached) */
+	oracleCloseStatement(session);
+
+	return result;
+}
+
+/*
  * oracleCheckPlaceholders
  * 		Check the bind placeholders in "query".
  * 		Placeholders inside string literals, quoted identifiers and comments
@@ -2890,7 +3002,17 @@ oracleStartDynamic(oracleSession *session, struct dynState *state)
 
 	if (result != OCI_SUCCESS && result != OCI_NO_DATA)
 	{
-		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+		/*
+		 * ORA-14551 means that the function called in the query modifies
+		 * data; point the user to the way that allows that.
+		 */
+		if (err_code == 14551)
+			oracleError_ssdh(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error executing query: OCIStmtExecute failed to execute remote query",
+				"", "", oraMessage,
+				"use oracle_call to call functions that modify data");
+
+		oracleError_d(err_code == 8177 ? FDW_SERIALIZATION_FAILURE : FDW_UNABLE_TO_CREATE_EXECUTION,
 			"error executing query: OCIStmtExecute failed to execute remote query",
 			oraMessage);
 	}
