@@ -930,6 +930,7 @@ oracle_query(PG_FUNCTION_ARGS)
 		char **values;
 		HeapTuple tuple;
 		int fetched;
+		int c;
 
 		/* the row is built in the per-call memory context */
 		values = (char **) palloc(qstate->state->ndef * sizeof(char *));
@@ -950,6 +951,16 @@ oracle_query(PG_FUNCTION_ARGS)
 
 		if (fetched)
 		{
+			/*
+			 * RAW columns are transferred as hex strings; add the "\x"
+			 * prefix that the bytea input function expects.
+			 */
+			for (c=0; c<qstate->state->ndef; ++c)
+				if (values[c] != NULL
+					&& oracleColIsRaw(qstate->state, c)
+					&& TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid == BYTEAOID)
+					values[c] = psprintf("\\x%s", values[c]);
+
 			/* the strings are interpreted by the type input functions */
 			tuple = BuildTupleFromCStrings(qstate->attinmeta, values);
 
