@@ -71,8 +71,27 @@ struct oracleSession
 	unsigned int fetched_rows;
 	unsigned int current_row;  /* first row is 1 */
 };
+
+/*
+ * Execution state of a dynamic query prepared with oraclePrepareDynamic.
+ * The buffers hold at most "prefetch" rows of the first "ndef" columns;
+ * "colname" and "coltype" cover the defined columns.
+ */
+struct dynState
+{
+	int ncols;      /* number of result columns */
+	int ndef;       /* number of result columns that are defined */
+	int prefetch;   /* number of rows fetched at once */
+	char **colname; /* array [ndef] of column names */
+	int *coltype;   /* array [ndef] of the Oracle data types of the columns */
+	sb2 **ind;      /* array [ndef][prefetch row] of NULL indicators */
+	ub2 **len;      /* array [ndef][prefetch row] of value lengths */
+	char **buf;     /* array [ndef] of prefetch * buffer size result buffers */
+	sb4 *buf_size;  /* buffer size per defined column */
+};
 #endif
 typedef struct oracleSession oracleSession;
+typedef struct dynState dynState;
 
 /* types for the Oracle table description */
 typedef enum
@@ -235,6 +254,11 @@ extern unsigned int oracleExecuteQuery(oracleSession *session, const struct oraT
 extern unsigned int oracleFetchNext(oracleSession *session, unsigned int prefetch);
 extern void oracleExecuteCall(oracleSession *session, char * const stmt);
 extern struct dynResult *oracleExecDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch);
+extern struct dynState *oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch, int define_cols);
+extern void oracleStartDynamic(oracleSession *session, struct dynState *state);
+extern int oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values);
+extern void oracleCloseDynamic(oracleSession *session, struct dynState *state);
+extern int oracleColIsRaw(struct dynState *state, int col);
 extern int oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, int *nocc);
 extern void oracleGetLob(oracleSession *session, void *locptr, oraType type, char **value, long *value_len);
 extern void oracleClientVersion(int *major, int *minor, int *update, int *patch, int *port_patch);
