@@ -235,6 +235,7 @@ extern unsigned int oracleExecuteQuery(oracleSession *session, const struct oraT
 extern unsigned int oracleFetchNext(oracleSession *session, unsigned int prefetch);
 extern void oracleExecuteCall(oracleSession *session, char * const stmt);
 extern struct dynResult *oracleExecDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch);
+extern int oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, int *nocc);
 extern void oracleGetLob(oracleSession *session, void *locptr, oraType type, char **value, long *value_len);
 extern void oracleClientVersion(int *major, int *minor, int *update, int *patch, int *port_patch);
 extern void oracleServerVersion(oracleSession *session, int *major, int *minor, int *update, int *patch, int *port_patch);
