@@ -1177,6 +1177,19 @@ SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
  98
 (1 row)
 
+-- RAW columns are transferred as hex; as bytea they need the "\x" prefix
+SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r bytea);
+   r    
+--------
+ \x4142
+(1 row)
+
+SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r text);
+  r   
+------
+ 4142
+(1 row)
+
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query

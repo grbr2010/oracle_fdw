@@ -716,6 +716,9 @@ SELECT * FROM oracle_query('oracle', 'SELECT 1, 1/0 FROM dual') AS q(a numeric);
 -- an error during the fetch is reported and leaves the session usable
 SELECT * FROM oracle_query('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END n FROM dual CONNECT BY level <= 2') AS q(n numeric);
 SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
+-- RAW columns are transferred as hex; as bytea they need the "\x" prefix
+SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r bytea);
+SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r text);
 
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
