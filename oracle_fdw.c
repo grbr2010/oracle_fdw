@@ -797,41 +797,42 @@ parseParamArray(FunctionCallInfo fcinfo, int argno, int *nparams)
 }
 
 /*
- * execDynamic
- * 		Connect to the foreign server and run a dynamic query.
- * 		The returned dynResult is allocated in the current memory context,
- * 		the session is freed (the connection stays cached).
+ * State of a running oracle_query, lives in the SRF's multi-call memory
+ * context.
  */
-static struct dynResult *
-execDynamic(Name srvname, char *stmt, char **params, int nparams)
+struct queryState
 {
-	oracleSession *session = oracleConnectServer(srvname);
-	struct dynResult *result;
+	oracleSession *session;    /* Oracle session */
+	struct dynState *state;    /* dynamic query state */
+	AttInMetadata *attinmeta;  /* for building the result tuples */
+	int done;                  /* set when the query has been closed */
+};
 
-	PG_TRY();
-	{
-		result = oracleExecDynamic(session, stmt, nparams, params, DEFAULT_PREFETCH);
-	}
-	PG_CATCH();
-	{
-		/* the error may have left the statement open on the cached session */
-		oracleCloseStatement(session);
-		pfree(session);
-		PG_RE_THROW();
-	}
-	PG_END_TRY();
+/*
+ * queryCleanup
+ * 		Memory context callback that closes the dynamic query when the SRF's
+ * 		multi-call memory context is reset before the query was closed, e.g.
+ * 		when the consumer stops fetching early or the query is canceled.
+ * 		It must not be reached while the transaction is aborting (the close
+ * 		paths in oracle_query take care of that), so it can assume that the
+ * 		statement is still open.
+ */
+static void
+queryCleanup(void *arg)
+{
+	struct queryState *qstate = (struct queryState *)arg;
 
-	/* free the session (connection will be cached) */
-	pfree(session);
+	if (!qstate->done && qstate->state != NULL)
+		oracleCloseDynamic(qstate->session, qstate->state);
 
-	return result;
+	qstate->done = 1;
 }
 
 /*
  * oracle_query
  * 		Execute a query that returns a result on a foreign server and
- * 		return all result rows.  The result types are taken from the column
- * 		definition list at the call site, e.g.
+ * 		return the result rows one after the other.  The result types are
+ * 		taken from the column definition list at the call site, e.g.
  * 		SELECT * FROM oracle_query('srv', 'SELECT ...') AS t(col1 int, col2 text);
  * 		Bind parameters are passed as :1, :2, ... in the "params" array.
  */
@@ -839,7 +840,7 @@ PGDLLEXPORT Datum
 oracle_query(PG_FUNCTION_ARGS)
 {
 	FuncCallContext *funcctx;
-	HeapTuple *tuples;
+	struct queryState *qstate;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
 		ereport(ERROR,
@@ -848,14 +849,12 @@ oracle_query(PG_FUNCTION_ARGS)
 
 	if (SRF_IS_FIRSTCALL())
 	{
-		MemoryContext oldctx, execctx;
+		MemoryContext oldctx;
 		TupleDesc tupdesc;
-		AttInMetadata *attinmeta;
+		MemoryContextCallback *cleanup;
 		char *stmt;
 		char **params;
-		int nparams, c;
-		long r;
-		struct dynResult *result;
+		int nparams;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 		oldctx = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -867,75 +866,104 @@ oracle_query(PG_FUNCTION_ARGS)
 					errmsg("oracle_query requires a column definition list"),
 					errhint("Specify the result types, e.g. SELECT * FROM oracle_query(...) AS t(col1 numeric, col2 text).")));
 
-		attinmeta = TupleDescGetAttInMetadata(tupdesc);
+		qstate = (struct queryState *) palloc(sizeof(struct queryState));
+		qstate->session = NULL;
+		qstate->state = NULL;
+		qstate->done = 0;
+		qstate->attinmeta = TupleDescGetAttInMetadata(tupdesc);
+
+		/*
+		 * Register a cleanup callback that closes the statement and frees the
+		 * dynamic query state when this memory context is reset, so that the
+		 * remote cursor does not stay open if the consumer stops fetching
+		 * early.  Everything else allocated here is freed with the context.
+		 */
+		cleanup = (MemoryContextCallback *) palloc(sizeof(MemoryContextCallback));
+		cleanup->func = queryCleanup;
+		cleanup->arg = (void *) qstate;
+		MemoryContextRegisterResetCallback(funcctx->multi_call_memory_ctx, cleanup);
 
 		stmt = text_to_cstring(PG_GETARG_TEXT_PP(1));
 		params = parseParamArray(fcinfo, 2, &nparams);
 
-		/*
-		 * Run the query in a dedicated memory context (a child of the
-		 * multi-call context) that can be freed once the rows are converted.
-		 */
-		execctx = AllocSetContextCreate(funcctx->multi_call_memory_ctx,
-										"oracle_fdw dynamic query",
-										ALLOCSET_SMALL_SIZES);
-		MemoryContextSwitchTo(execctx);
+		qstate->session = oracleConnectServer(PG_GETARG_NAME(0));
 
 		PG_TRY();
 		{
-			result = execDynamic(PG_GETARG_NAME(0), stmt, params, nparams);
+			/* prepare the query and define all result columns as strings */
+			qstate->state = oraclePrepareDynamic(qstate->session, stmt, nparams, params, DEFAULT_PREFETCH, 0);
+
+			/*
+			 * Check the number of columns before the query is executed on the
+			 * remote server, so that a mismatch cannot have any side effects.
+			 */
+			if (qstate->state->ncols != (int)tupdesc->natts)
+				ereport(ERROR,
+						(errcode(ERRCODE_DATATYPE_MISMATCH),
+						errmsg("remote query returned %d columns, but the column definition list has %d",
+							   qstate->state->ncols, (int)tupdesc->natts)));
+
+			oracleStartDynamic(qstate->session, qstate->state);
 		}
 		PG_CATCH();
 		{
-			MemoryContextSwitchTo(oldctx);
-			MemoryContextDelete(execctx);
+			if (qstate->state != NULL)
+				oracleCloseDynamic(qstate->session, qstate->state);
+			qstate->done = 1;
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
 
-		MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
-
-		if (result->ncols != tupdesc->natts)
-			ereport(ERROR,
-					(errcode(ERRCODE_DATATYPE_MISMATCH),
-					errmsg("remote query returned %d columns, but the column definition list has %d",
-						   result->ncols, (int)tupdesc->natts)));
-
-		/* convert all rows (the strings are interpreted by the type input functions) */
-		tuples = (HeapTuple *) palloc(result->nrows * sizeof(HeapTuple));
-		for (r=0; r<result->nrows; ++r)
-		{
-			char **cstrs = (char **) palloc(tupdesc->natts * sizeof(char *));
-
-			for (c=0; c<tupdesc->natts; ++c)
-				cstrs[c] = result->values[r][c];
-
-			tuples[r] = BuildTupleFromCStrings(attinmeta, cstrs);
-			pfree(cstrs);
-		}
-
-		funcctx->user_fctx = (void *) tuples;
-		funcctx->max_calls = (uint64) result->nrows;
-
-		/* free the Oracle result (the tuples were copied) */
-		MemoryContextDelete(execctx);
+		funcctx->user_fctx = (void *) qstate;
 
 		MemoryContextSwitchTo(oldctx);
 	}
 
-	/* return the tuples one after the other */
+	/* return the rows one after the other */
 	funcctx = SRF_PERCALL_SETUP();
-	tuples = (HeapTuple *) funcctx->user_fctx;
+	qstate = (struct queryState *) funcctx->user_fctx;
 
-	if (funcctx->call_cntr < funcctx->max_calls)
-	{
-		/* compute the result first: SRF_RETURN_NEXT increments call_cntr */
-		Datum result = HeapTupleGetDatum(tuples[funcctx->call_cntr]);
-
-		SRF_RETURN_NEXT(funcctx, result);
-	}
-	else
+	if (qstate->done)
 		SRF_RETURN_DONE(funcctx);
+	else
+	{
+		char **values;
+		HeapTuple tuple;
+		int fetched;
+
+		/* the row is built in the per-call memory context */
+		values = (char **) palloc(qstate->state->ndef * sizeof(char *));
+
+		PG_TRY();
+		{
+			CHECK_FOR_INTERRUPTS();
+
+			fetched = oracleFetchDynamic(qstate->session, qstate->state, values);
+		}
+		PG_CATCH();
+		{
+			oracleCloseDynamic(qstate->session, qstate->state);
+			qstate->done = 1;
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+
+		if (fetched)
+		{
+			/* the strings are interpreted by the type input functions */
+			tuple = BuildTupleFromCStrings(qstate->attinmeta, values);
+
+			SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
+		}
+		else
+		{
+			/* the result is exhausted; close the query */
+			oracleCloseDynamic(qstate->session, qstate->state);
+			qstate->done = 1;
+
+			SRF_RETURN_DONE(funcctx);
+		}
+	}
 }
 
 /*

@@ -1153,6 +1153,33 @@ SELECT oracle_scalar('oracle', 'SELECT NULL FROM dual');
  
 (1 row)
 
+-- oracle_query streams the rows into a spilling tuplestore; the whole result
+-- is read, but the remote cursor is closed when the query is done or aborted
+SELECT * FROM oracle_query('oracle', 'SELECT level n FROM dual CONNECT BY level <= 5') AS q(n numeric) LIMIT 1;
+ n 
+---
+ 1
+(1 row)
+
+SELECT oracle_scalar('oracle', 'SELECT 99 FROM dual');
+ oracle_scalar 
+---------------
+ 99
+(1 row)
+
+-- the column definition list is checked before the statement is executed
+SELECT * FROM oracle_query('oracle', 'SELECT 1, 1/0 FROM dual') AS q(a numeric);
+ERROR:  remote query returned 2 columns, but the column definition list has 1
+-- an error during the fetch is reported and leaves the session usable
+SELECT * FROM oracle_query('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END n FROM dual CONNECT BY level <= 2') AS q(n numeric);
+ERROR:  error fetching result: OCIStmtFetch2 failed to fetch next result rows
+DETAIL:  ORA-01476: divisor is equal to zero
+SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
+ oracle_scalar 
+---------------
+ 98
+(1 row)
+
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query
