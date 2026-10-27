@@ -694,3 +694,48 @@ SELECT * FROM oracle_query('oracle', 'DELETE FROM typetest1 WHERE 1 = 0') AS q(n
 -- remote errors are reported
 SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);
 SELECT oracle_execute('oracle', 'DROP PACKAGE scott.testpkg');
+
+
+/* test the transactional behavior of the dynamic functions */
+
+-- create a remote table for the tests; drop a leftover from an aborted previous run
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP TABLE scott.subx_test PURGE');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+SELECT oracle_execute('oracle', 'CREATE TABLE scott.subx_test (v varchar2(10))');
+
+-- remote DML is rolled back when the local transaction rolls back
+BEGIN;
+SELECT oracle_execute('oracle', 'INSERT INTO scott.subx_test VALUES (''gone'')');
+ROLLBACK;
+SELECT * FROM oracle_query('oracle', 'SELECT v FROM scott.subx_test') AS q(v text);
+
+-- remote DML in an aborted subtransaction is rolled back even if the first
+-- Oracle call in the transaction happens inside the subtransaction
+DO
+$$BEGIN
+   PERFORM oracle_scalar('oracle', 'SELECT 1 FROM dual');
+   PERFORM oracle_execute('oracle', 'INSERT INTO scott.subx_test VALUES (''gone'')');
+   RAISE EXCEPTION 'abort';
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+SELECT * FROM oracle_query('oracle', 'SELECT v FROM scott.subx_test') AS q(v text);
+
+-- a failed remote DDL implicitly commits the remote transaction; the rollback
+-- to the savepoint must not mask the original error during exception cleanup
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP VIEW scott.no_such_view_xyz');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+SELECT * FROM oracle_query('oracle', 'SELECT v FROM scott.subx_test') AS q(v text);
+
+SELECT oracle_execute('oracle', 'DROP TABLE scott.subx_test PURGE');
