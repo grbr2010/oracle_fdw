@@ -2338,6 +2338,157 @@ oracleExecuteCall(oracleSession *session, char * const stmt)
 }
 
 /*
+ * oracleCheckPlaceholders
+ * 		Check the bind placeholders in "query".
+ * 		Placeholders inside string literals, quoted identifiers and comments
+ * 		are ignored; the same is true for the PL/SQL assignment operator (":=")
+ * 		and for double colons.
+ * 		Each placeholder must have the form :N (or :pN if "p_style" is true),
+ * 		where N is an integer between "base" and "base + maxnum - 1"; the
+ * 		distinct placeholder numbers must form a gap-free sequence starting
+ * 		with "base".  A placeholder may appear more than once.
+ * 		Named placeholders are rejected.
+ * 		Returns the highest placeholder number found (base - 1 if there is
+ * 		none) and stores the number of placeholder occurrences in *nocc.
+ */
+int
+oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, int *nocc)
+{
+	const char *p = query;
+	char *used;  /* used[i - base] is nonzero if the placeholder number i occurs */
+	char name[128];
+	int max = base - 1;
+	int i, n;
+
+	*nocc = 0;
+	used = oracleAlloc(maxnum > 0 ? (size_t)maxnum : 1);
+
+	while (*p != '\0')
+	{
+		if (*p == '\'')
+		{
+			/* string literal; '' is an escaped single quote */
+			++p;
+			while (*p != '\0' && *p != '\'')
+			{
+				if (p[0] == '\'' && p[1] == '\'')
+					p += 2;
+				else
+					++p;
+			}
+			if (*p != '\0')
+				++p;
+		}
+		else if (*p == '"')
+		{
+			/* quoted identifier; "" is an escaped double quote */
+			++p;
+			while (*p != '\0' && *p != '"')
+			{
+				if (p[0] == '"' && p[1] == '"')
+					p += 2;
+				else
+					++p;
+			}
+			if (*p != '\0')
+				++p;
+		}
+		else if (p[0] == '-' && p[1] == '-')
+		{
+			/* line comment */
+			while (*p != '\0' && *p != '\n')
+				++p;
+		}
+		else if (p[0] == '/' && p[1] == '*')
+		{
+			/* block comment; block comments do not nest in Oracle */
+			for (p += 2; *p != '\0' && !(p[0] == '*' && p[1] == '/'); ++p)
+				;
+			if (*p != '\0')
+				p += 2;
+		}
+		else if (p[0] == ':' && (p[1] == '=' || p[1] == ':'))
+		{
+			/* PL/SQL assignment or double colon, not a placeholder */
+			p += 2;
+		}
+		else if (*p == ':')
+		{
+			/* possible bind placeholder */
+			const char *start;
+			int len, numstart, numlen, num = 0;
+
+			start = ++p;
+			while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z')
+				|| (*p >= '0' && *p <= '9') || *p == '_' || *p == '$' || *p == '#')
+				++p;
+			len = (int)(p - start);
+
+			/* copy the placeholder name for error messages */
+			n = len < (int)sizeof(name) - 1 ? len : (int)sizeof(name) - 1;
+			memcpy(name, start, (size_t)n);
+			name[n] = '\0';
+
+			/*
+			 * Parse the placeholder number: ":N" or, for p_style, ":pN".
+			 * The number must not have leading zeroes (":01" is a different
+			 * bind name than ":1" for Oracle) and must not be unreasonably long.
+			 */
+			numstart = (p_style && len > 0 && start[0] == 'p');
+			for (numlen = 0; numstart + numlen < len
+				&& start[numstart + numlen] >= '0' && start[numstart + numlen] <= '9'; ++numlen)
+			{
+				if (num <= 200000000)
+					num = 10 * num + (start[numstart + numlen] - '0');
+			}
+
+			if (numstart + numlen < len || numlen == 0
+				|| (numlen > 1 && start[numstart] == '0'))
+			{
+				/* not a number, no number at all, or leading zero: named placeholder */
+				if (p_style)
+					oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
+						"the PL/SQL block uses the named bind placeholder :%s; only the positional bind placeholders :p0, :p1, ... are supported",
+						name,
+						"bind parameter values are passed as an array of strings");
+				else
+					oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
+						"the remote query uses the named bind placeholder :%s; only the positional bind placeholders :1, :2, ... are supported",
+						name,
+						"bind parameter values are passed as an array of strings");
+			}
+
+			if (num < base || num >= base + maxnum)
+				oracleError_i(FDW_UNABLE_TO_CREATE_EXECUTION,
+					p_style
+						? "the PL/SQL block uses the bind placeholder :p%d, but not enough bind parameters were supplied"
+						: "the remote query uses the bind placeholder :%d, but not enough bind parameters were supplied",
+					num);
+
+			used[num - base] = 1;
+			++*nocc;
+			if (num > max)
+				max = num;
+		}
+		else
+			++p;
+	}
+
+	/* the placeholder numbers must be gap-free starting with "base" */
+	for (i=base; i<=max; ++i)
+		if (!used[i - base])
+			oracleError_i(FDW_UNABLE_TO_CREATE_EXECUTION,
+				p_style
+					? "the bind placeholders in the PL/SQL block are not consecutive; the bind placeholder :p%d is missing"
+					: "the bind placeholders in the remote query are not consecutive; the bind placeholder :%d is missing",
+				i);
+
+	oracleFree(used);
+
+	return max;
+}
+
+/*
  * oracleExecDynamic
  * 		Execute a query with bind parameters and return all result rows.
  * 		The parameters are bound as strings to the placeholders :1, :2, ...
@@ -2356,8 +2507,11 @@ oracleExecDynamic(oracleSession *session, const char *query, int nparams, char *
 	sword result;
 	ub4 rowcount;
 	ub4 ncols;
+	ub4 stmt_type;
+	ub4 bind_count;
 	int i, c;
 	unsigned int idx;
+	int maxpl, nocc;
 	long nrows = 0, nrows_alloc = 100;
 	sb2 *param_ind = NULL;  /* NULL indicators for the bind parameters */
 	char *param_name = NULL;  /* the bind parameter names ":1", ":2", ... */
@@ -2399,6 +2553,54 @@ oracleExecDynamic(oracleSession *session, const char *query, int nparams, char *
 			oraMessage);
 	}
 
+	/*
+	 * Reject statements that do not return a result before doing anything
+	 * else; the statement type is already determined by OCIStmtPrepare2.
+	 * This works regardless of the case of the statement or any whitespace,
+	 * comments, or CTEs preceding it.
+	 */
+	if (checkerr(
+		OCIAttrGet((dvoid *)session->stmthp, (ub4)OCI_HTYPE_STMT,
+			(dvoid *)&stmt_type, (ub4 *)0, (ub4)OCI_ATTR_STMT_TYPE, session->envp->errhp),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+	{
+		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"error executing query: OCIAttrGet failed to get the statement type",
+			oraMessage);
+	}
+
+	/*
+	 * Only the low 16 bits of the statement type contain the type itself;
+	 * the higher bits contain version-specific flags.
+	 */
+	if ((stmt_type & 0x0000FFFF) != OCI_STMT_SELECT)
+		oracleError(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"remote statement is not a query; use oracle_execute or oracle_exec for statements without results");
+
+	/*
+	 * Check the bind placeholders in the query: they must be the positional
+	 * placeholders :1, :2, ... without gaps (repeats are allowed) and match
+	 * the number of parameters.  The number of bind variables reported by
+	 * Oracle is used as a cross check on the lexical analysis.
+	 */
+	maxpl = oracleCheckPlaceholders(query, 1, nparams, 0, &nocc);
+
+	if (maxpl != nparams)
+		oracleError_ii(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"the number of bind variables in the remote query (%d) does not match the number of parameters (%d)",
+			maxpl, nparams);
+
+	if (checkerr(
+		OCIAttrGet((dvoid *)session->stmthp, (ub4)OCI_HTYPE_STMT,
+			(dvoid *)&bind_count, (ub4 *)0, (ub4)OCI_ATTR_BIND_COUNT, session->envp->errhp),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) == OCI_SUCCESS
+		&& bind_count != (ub4)nocc)
+	{
+		oracleError_ii(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"the number of bind variables in the remote query (%d) does not match the number of parameters (%d)",
+			(int)bind_count, nparams);
+	}
+
 	/* bind the parameters */
 	if (nparams > 0)
 	{
@@ -2428,12 +2630,9 @@ oracleExecDynamic(oracleSession *session, const char *query, int nparams, char *
 	}
 
 	/*
-	 * Only queries have a select list that can be described; OCI_DESCRIBE_ONLY
-	 * fails with ORA-24333 for DML and DDL statements, so reject them right away.
+	 * Only queries have a select list that can be described; statements that
+	 * do not return a result have been rejected after OCIStmtPrepare2.
 	 */
-	if (strncmp(query, "SELECT", 6) != 0 && strncmp(query, "WITH", 4) != 0)
-		oracleError(FDW_UNABLE_TO_CREATE_EXECUTION,
-			"remote statement does not return a result; use oracle_execute for statements without results");
 
 	/* describe the query to get the select list */
 	if (checkerr(
@@ -2703,6 +2902,12 @@ oracleExecDynamic(oracleSession *session, const char *query, int nparams, char *
 			else
 			{
 				char *value = oracleAlloc((size_t)len[c][r] + 1);
+
+				if (ind[c][r] < -1)
+					oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
+						"the value of column %s was truncated on the remote server",
+						res->colname[c],
+						"use CAST or TO_CHAR to convert the column to a shorter representation");
 
 				memcpy(value, buf[c] + (size_t)r * buf_size[c], len[c][r]);
 				value[len[c][r]] = '\0';

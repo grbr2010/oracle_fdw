@@ -685,6 +685,25 @@ SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.mult(1, 1) FROM dual WHERE 
 SELECT * FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(level, 2) n, scott.testpkg.greet(''u'' || level) g FROM dual CONNECT BY level <= 2') AS q(n numeric, g text);
 SELECT count(*) FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(1, 1) FROM dual WHERE 1 = 0') AS q(n numeric);
 
+-- the statement type is determined by Oracle, so lowercase, whitespace and comments are ok
+SELECT oracle_scalar('oracle', 'select 1 from dual');
+SELECT oracle_scalar('oracle', '  SELECT 1 FROM dual');
+SELECT oracle_scalar('oracle', '/* a comment */ SELECT 1 FROM dual');
+SELECT oracle_scalar('oracle', 'WITH x AS (SELECT 1 n FROM dual) SELECT n FROM x');
+-- DML is rejected before it can be described or executed
+SELECT oracle_scalar('oracle', 'DELETE FROM typetest1 WHERE id = :1', ARRAY['1']);
+-- the bind placeholders must be positional :1, :2, ... without gaps; repeats are ok
+SELECT oracle_scalar('oracle', 'SELECT :1, :1 FROM dual', ARRAY['7']);
+SELECT oracle_scalar('oracle', 'SELECT nvl(:1, :2) FROM dual', ARRAY['x']);
+SELECT oracle_scalar('oracle', 'SELECT :1 FROM dual', ARRAY['x', 'y']);
+SELECT oracle_scalar('oracle', 'SELECT :foo FROM dual', ARRAY['x']);
+SELECT oracle_scalar('oracle', 'SELECT :2 FROM dual', ARRAY['x', 'y']);
+SELECT oracle_scalar('oracle', 'SELECT :1 + :3 FROM dual', ARRAY['1', '2']);
+-- bind placeholders inside strings and comments are not bound
+SELECT oracle_scalar('oracle', 'SELECT ''a:1'' FROM dual');
+SELECT oracle_scalar('oracle', 'SELECT ''a'''':1'' FROM dual');
+SELECT oracle_scalar('oracle', 'SELECT 2 /* :1 */ FROM dual');
+
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
 -- the number of result columns must match the column definition list

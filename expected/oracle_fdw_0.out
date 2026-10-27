@@ -1066,6 +1066,71 @@ SELECT count(*) FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(1, 1) FRO
      0
 (1 row)
 
+-- the statement type is determined by Oracle, so lowercase, whitespace and comments are ok
+SELECT oracle_scalar('oracle', 'select 1 from dual');
+ oracle_scalar 
+---------------
+ 1
+(1 row)
+
+SELECT oracle_scalar('oracle', '  SELECT 1 FROM dual');
+ oracle_scalar 
+---------------
+ 1
+(1 row)
+
+SELECT oracle_scalar('oracle', '/* a comment */ SELECT 1 FROM dual');
+ oracle_scalar 
+---------------
+ 1
+(1 row)
+
+SELECT oracle_scalar('oracle', 'WITH x AS (SELECT 1 n FROM dual) SELECT n FROM x');
+ oracle_scalar 
+---------------
+ 1
+(1 row)
+
+-- DML is rejected before it can be described or executed
+SELECT oracle_scalar('oracle', 'DELETE FROM typetest1 WHERE id = :1', ARRAY['1']);
+ERROR:  remote statement is not a query; use oracle_execute or oracle_exec for statements without results
+-- the bind placeholders must be positional :1, :2, ... without gaps; repeats are ok
+SELECT oracle_scalar('oracle', 'SELECT :1, :1 FROM dual', ARRAY['7']);
+ oracle_scalar 
+---------------
+ 7
+(1 row)
+
+SELECT oracle_scalar('oracle', 'SELECT nvl(:1, :2) FROM dual', ARRAY['x']);
+ERROR:  the remote query uses the bind placeholder :2, but not enough bind parameters were supplied
+SELECT oracle_scalar('oracle', 'SELECT :1 FROM dual', ARRAY['x', 'y']);
+ERROR:  the number of bind variables in the remote query (1) does not match the number of parameters (2)
+SELECT oracle_scalar('oracle', 'SELECT :foo FROM dual', ARRAY['x']);
+ERROR:  the remote query uses the named bind placeholder :foo; only the positional bind placeholders :1, :2, ... are supported
+DETAIL:  bind parameter values are passed as an array of strings
+SELECT oracle_scalar('oracle', 'SELECT :2 FROM dual', ARRAY['x', 'y']);
+ERROR:  the bind placeholders in the remote query are not consecutive; the bind placeholder :1 is missing
+SELECT oracle_scalar('oracle', 'SELECT :1 + :3 FROM dual', ARRAY['1', '2']);
+ERROR:  the remote query uses the bind placeholder :3, but not enough bind parameters were supplied
+-- bind placeholders inside strings and comments are not bound
+SELECT oracle_scalar('oracle', 'SELECT ''a:1'' FROM dual');
+ oracle_scalar 
+---------------
+ a:1
+(1 row)
+
+SELECT oracle_scalar('oracle', 'SELECT ''a'''':1'' FROM dual');
+ oracle_scalar 
+---------------
+ a':1
+(1 row)
+
+SELECT oracle_scalar('oracle', 'SELECT 2 /* :1 */ FROM dual');
+ oracle_scalar 
+---------------
+ 2
+(1 row)
+
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query
@@ -1076,7 +1141,7 @@ SELECT * FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(1, 1), scott.tes
 ERROR:  remote query returned 2 columns, but the column definition list has 1
 -- statements that do not return a result are rejected
 SELECT * FROM oracle_query('oracle', 'DELETE FROM typetest1 WHERE 1 = 0') AS q(n numeric);
-ERROR:  remote statement does not return a result; use oracle_execute for statements without results
+ERROR:  remote statement is not a query; use oracle_execute or oracle_exec for statements without results
 -- remote errors are reported
 SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);
 ERROR:  error describing query: OCIStmtExecute failed to describe remote query
