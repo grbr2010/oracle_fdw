@@ -1012,7 +1012,6 @@ SELECT * FROM b;
 
 ROLLBACK;
 /* test oracle_scalar and oracle_query calling remote functions */
-
 -- create a test package on the Oracle server
 SELECT oracle_execute('oracle', 'CREATE OR REPLACE PACKAGE scott.testpkg IS FUNCTION mult(a integer, b integer) RETURN integer; FUNCTION greet(who varchar2) RETURN varchar2; FUNCTION nvl_len(who varchar2) RETURN integer; FUNCTION boom RETURN integer; END;');
  oracle_execute 
@@ -1074,6 +1073,7 @@ SELECT count(*) FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(1, 1) FRO
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query
 DETAIL:  ORA-20142: custom failure
+ORA-06512: at "SCOTT.TESTPKG", line 1
 -- the number of result columns must match the column definition list
 SELECT * FROM oracle_query('oracle', 'SELECT scott.testpkg.mult(1, 1), scott.testpkg.mult(2, 2) FROM dual') AS q(n numeric);
 ERROR:  remote query returned 2 columns, but the column definition list has 1
@@ -1089,3 +1089,4 @@ SELECT oracle_execute('oracle', 'DROP PACKAGE scott.testpkg');
 ----------------
  
 (1 row)
+
