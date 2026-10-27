@@ -140,7 +140,7 @@ transactions.
 
 These functions can be used to execute a query that returns a result on the
 remote Oracle server, typically a call of a remote function or a package
-procedure that Oracle database links otherwise provide.
+function that Oracle database links otherwise provide.
 
 Both functions take the same three arguments:
 
@@ -151,9 +151,12 @@ Both functions take the same three arguments:
   the values are passed as strings and interpreted by Oracle, so `ARRAY['50']`
   is a valid value for a `NUMBER` parameter).
 
-Both functions require the statement to be a query (a `SELECT` or a `WITH`
-statement); statements that return no result must be executed with
-`oracle_execute`.
+Both functions require the statement to be a query; it is Oracle that
+decides what a query is, so lowercase keywords, leading whitespace and
+comments are all fine, while DML, DDL and PL/SQL blocks are rejected with
+an error.  Statements that return no result must be executed with
+`oracle_execute`, functions that modify data with `oracle_call` (see
+below).
 
 The functions differ in how the result is returned:
 
@@ -165,10 +168,34 @@ The functions differ in how the result is returned:
 
 - Use **oracle_scalar** when the statement returns a *single value*.  It
   returns the first column of the first result row as `text` (NULL if the
-  statement returns no rows; if the statement returns several rows or columns,
-  the extra ones are ignored).  Typical use cases are calls of remote
-  functions in assignments and in conditions, which is what Oracle database
-  link calls like `pkg.func@dblink(...)` do.
+  statement returns no rows or the first value is NULL).  Only the first
+  column is read and the fetch stops after the first row, so later rows and
+  columns are neither transferred nor evaluated; an error or an unsupported
+  data type there does not affect the call.  Typical use cases are calls of
+  remote functions in assignments and in conditions, which is what Oracle
+  database link calls like `pkg.func@dblink(...)` do.
+
+    FUNCTION oracle_call(server name, func text, VARIADIC args text[] DEFAULT NULL)
+           RETURNS text
+    FUNCTION oracle_exec(server name, block text, VARIADIC args text[] DEFAULT NULL)
+           RETURNS text
+
+These functions can call remote functions that modify data and remote
+procedures with OUT parameters, which a query cannot do; see the sections
+on **oracle_call** and **oracle_exec** below.
+
+`oracle_query`, `oracle_scalar`, `oracle_call` and `oracle_exec` are revoked
+from `PUBLIC` when the extension is created, because they can execute
+arbitrary SQL on the Oracle server with the credentials of the calling
+user's mapping.  Grant `EXECUTE` on them to the roles that need it:
+
+    GRANT EXECUTE ON FUNCTION oracle_query(name, text, text[]) TO migrator;
+    GRANT EXECUTE ON FUNCTION oracle_scalar(name, text, text[]) TO migrator;
+    GRANT EXECUTE ON FUNCTION oracle_call(name, text, text[]) TO migrator;
+    GRANT EXECUTE ON FUNCTION oracle_exec(name, text, text[]) TO migrator;
+
+`oracle_execute` keeps its default `PUBLIC` privilege for backward
+compatibility with existing installations.
 
 **oracle_query in detail**
 
@@ -192,8 +219,13 @@ in a single statement on the Oracle server:
     SELECT * FROM oracle_query('oradb',
                'SELECT d.doc_id, hr.calc_rating(d.cd_vf, d.datef, d.valute)
                 FROM doc_table d WHERE d.dt >= :1',
-               ARRAY[to_char(current_date, 'YYYY-MM-DD')])
+               ARRAY[to_char(current_date, 'YYYY-MM-DD HH24:MI:SS')])
         AS q(doc_id numeric, rating numeric);
+
+Note that a DATE bind parameter must be passed in the `NLS_DATE_FORMAT` of
+the oracle_fdw session, which is `YYYY-MM-DD HH24:MI:SS`; for a different
+format, convert the value on the remote side, for example with
+`TO_DATE(:1, 'YYYY-MM-DD')`.
 
 The result values are converted to strings by Oracle according to the NLS
 settings of the session, then converted to the PostgreSQL types from the
@@ -202,6 +234,8 @@ Only data types with a sensible string representation are supported in the
 select list (CHAR/VARCHAR2, NUMBER, FLOAT, BINARY_FLOAT, BINARY_DOUBLE, DATE,
 TIMESTAMP, INTERVAL and RAW); convert other types (LOBs, LONG and
 user-defined types) explicitly with CAST or TO_CHAR.
+A RAW column is transferred as a hex string: declare the result column as
+`text` to get the hex representation, or as `bytea` to get the binary value.
 
 **oracle_scalar in detail**
 
@@ -225,8 +259,8 @@ the local table, just like the Oracle database link call was:
 
     SELECT * FROM docs d
     WHERE oracle_scalar('oradb',
-          'SELECT abc.rat(:1, :2, :3) FROM dual',
-          ARRAY[d.cd_vf, to_char(d.datef, 'YYYY-MM-DD'), abc_valute])::numeric
+          'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
+          ARRAY[d.cd_vf, to_char(d.datef, 'YYYY-MM-DD'), d.valute])::numeric
           <> 0;
 
 To keep migrated code readable, wrap such calls in small PostgreSQL functions
@@ -238,19 +272,67 @@ look almost like the original Oracle code:
        LANGUAGE sql
     AS $$
        SELECT oracle_scalar('oradb',
-              'SELECT abc.rat(:1, :2, :3) FROM dual',
+              'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
               ARRAY[cd_vf, to_char(datef, 'YYYY-MM-DD'), valute])::numeric
     $$;
 
-    SELECT * FROM docs d WHERE abc_rat(d.cd_vf, d.datef, d.abc_valute) <> 0;
+    SELECT * FROM docs d WHERE abc_rat(d.cd_vf, d.datef, d.valute) <> 0;
 
 If you need a single value as anything but `text`, either cast the result or
 use `oracle_query` with a column definition list, which gives you a properly
 typed result:
 
     SELECT rating FROM oracle_query('oradb',
-           'SELECT abc.rat(:1, :2, :3) FROM dual',
+           'SELECT abc.rat(:1, TO_DATE(:2, ''YYYY-MM-DD''), :3) FROM dual',
            ARRAY['A', '2026-01-01', 'USD']) AS q(rating numeric);
+
+**oracle_call in detail**
+
+`oracle_call` calls a remote *function* that can modify data, which a plain
+query cannot do (Oracle rejects DML in a query with `ORA-14551`).  The
+function is called with an anonymous PL/SQL block, and the function result
+is returned through an OUT bind:
+
+    SELECT oracle_call('oradb', 'scott.f_dml', 'x');
+     oracle_call 
+    -------------
+               1
+
+The function name must consist of one to three unquoted identifier segments
+(`function`, `package.function` or `schema.package.function`), each no longer
+than the Oracle version's identifier limit (30 bytes before Oracle 12.2, 128
+bytes since).  Quoted names and overloaded functions need `oracle_exec`.
+
+The arguments are bound as strings to the positional bind parameters `:p1`,
+`:p2`, ... (a NULL argument binds SQL NULL); the function result is returned
+as `text` (NULL if the function returns NULL).  The result can be at most
+32767 bytes, the maximum length of a PL/SQL `VARCHAR2`; for longer results,
+write them to a table or return a CLOB and read it with `oracle_query` (CLOB
+results are not supported).
+
+The DML performed by the function participates in the local transaction: it
+is committed or rolled back with the PostgreSQL transaction, including
+savepoints and subtransactions.  This does not apply to operations that
+follow their own commit rules, like autonomous transactions or DDL.
+
+**oracle_exec in detail**
+
+`oracle_exec` executes an anonymous PL/SQL block that returns a result.
+The block must assign its result to the bind parameter `:p0`, which is bound
+as an OUT parameter; the arguments are bound as strings to the positional
+bind parameters `:p1`, `:p2`, ...:
+
+    SELECT oracle_exec('oradb', 'BEGIN scott.p_out(:p1, :p0); END;', '7');
+     oracle_exec 
+    -------------
+     v7
+
+Use `oracle_exec` for procedures with OUT parameters and for functions that
+need quoted names.  Use `oracle_execute` for blocks that return no result;
+`oracle_exec` rejects a block that does not assign `:p0`.
+
+The result must be at most 32767 bytes long; the same transaction caveats
+as for `oracle_call` apply.
 
 **Shared caveats**
 
@@ -259,6 +341,13 @@ permissions of the current user's mapping, and remote statements that modify
 data or have other side effects do not participate in oracle_fdw's two-phase
 transaction management, so an implicit COMMIT inside a called PL/SQL function
 cannot be rolled back with the local transaction.
+
+`oracle_query` runs with the regular semantics of a FROM-clause function:
+the executor reads the whole result into a tuplestore that can spill to
+disk, so memory use stays bounded no matter how large the result is.
+This also means that `LIMIT` does not reduce the amount of data read from
+the remote server, and that the remote cursor is closed only when the query
+ends, is canceled or fails.
 Also note that calling `oracle_scalar` once per row of a table causes one
 network round trip per call; for bulk processing it is more efficient to run
 a single statement with `oracle_query` that computes all results at once.
@@ -790,17 +879,13 @@ see the [Problems](#8-problems) section for details.
 oracle_fdw should compile and run on any platform supported by PostgreSQL and
 Oracle client, although I could only test it on Linux and Windows.
 
-PostgreSQL 9.3 or better is required.
+PostgreSQL 15 or better is required.
+PostgreSQL 14 and older are not supported, since PostgreSQL 14 support ended
+in November 2026, while PostgreSQL 15 is supported until November 2027.
 
 Due to API breaks in PostgreSQL minor releases, the following PostgreSQL
 versions cannot be used:
 
-- 9.6.0 to 9.6.8
-- 10.0 to 10.3
-- 11.0 to 11.10
-- 12.0 to 12.5
-- 13.0 to 13.9
-- 14.0 to 14.6
 - 15.0 to 15.1
 
 As always, you should be running the latest minor release for whatever
@@ -814,6 +899,10 @@ If you encounter problems while using such a PostgreSQL-derived server,
 please try with the original version before reporting an issue.
 
 Oracle client version 11.2 or better is required.
+Note that the regression test matrix only covers Oracle client 19 and Oracle
+server 18, 21 and 23; Oracle 11.2 remains the documented lower bound as an
+inherited commitment from upstream oracle_fdw, but it is not covered by
+tests here.
 oracle_fdw can be built and used with Oracle Instant Client as well as with
 Oracle Client and Server installations installed with Universal Installer.
 Binaries compiled with Oracle Client 11 can be used with later client versions
