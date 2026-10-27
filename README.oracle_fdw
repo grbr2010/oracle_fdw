@@ -142,21 +142,58 @@ These functions can be used to execute a query that returns a result on the
 remote Oracle server, typically a call of a remote function or a package
 procedure that Oracle database links otherwise provide.
 
-`oracle_query` returns all result rows.  Since the result types cannot be
-determined at function definition time, you have to supply a column definition
-list at the call site:
+Both functions take the same three arguments:
+
+- the name of the foreign server,
+- the statement to execute, and
+- optionally, an array of strings that is bound to the bind parameters
+  `:1`, `:2`, ... in the statement (a NULL array element binds SQL NULL;
+  the values are passed as strings and interpreted by Oracle, so `ARRAY['50']`
+  is a valid value for a `NUMBER` parameter).
+
+Both functions require the statement to be a query (a `SELECT` or a `WITH`
+statement); statements that return no result must be executed with
+`oracle_execute`.
+
+The functions differ in how the result is returned:
+
+- Use **oracle_query** when the statement returns a *set of rows* (any number
+  of rows and columns).  It returns all result rows, and you have to declare
+  the result types in a column definition list at the call site.  Typical use
+  cases are reading data from the remote server and "bulk" calls of remote
+  functions that compute results for many rows at once.
+
+- Use **oracle_scalar** when the statement returns a *single value*.  It
+  returns the first column of the first result row as `text` (NULL if the
+  statement returns no rows; if the statement returns several rows or columns,
+  the extra ones are ignored).  Typical use cases are calls of remote
+  functions in assignments and in conditions, which is what Oracle database
+  link calls like `pkg.func@dblink(...)` do.
+
+**oracle_query in detail**
+
+Since the result types cannot be determined at function definition time, you
+have to supply a column definition list at the call site:
 
     SELECT * FROM oracle_query('oradb', 'SELECT * FROM all_users')
         AS q(username text, user_id numeric);
 
-The statement can contain bind parameters `:1`, `:2`, ... that are set from
-the elements of the **params** array (a NULL array element binds SQL NULL;
-the values are passed as strings and interpreted by Oracle):
+A parameterized statement, reading data that match a condition:
 
     SELECT * FROM oracle_query(
                'oradb',
                'SELECT first_name FROM employees WHERE department_id = :1',
                ARRAY[50::text]) AS q(first_name text);
+
+A "bulk" call of a remote function: instead of calling the function once per
+row in PostgreSQL (one network round trip per call), compute all the results
+in a single statement on the Oracle server:
+
+    SELECT * FROM oracle_query('oradb',
+               'SELECT d.doc_id, hr.calc_rating(d.cd_vf, d.datef, d.valute)
+                FROM doc_table d WHERE d.dt >= :1',
+               ARRAY[to_char(current_date, 'YYYY-MM-DD')])
+        AS q(doc_id numeric, rating numeric);
 
 The result values are converted to strings by Oracle according to the NLS
 settings of the session, then converted to the PostgreSQL types from the
@@ -166,26 +203,65 @@ select list (CHAR/VARCHAR2, NUMBER, FLOAT, BINARY_FLOAT, BINARY_DOUBLE, DATE,
 TIMESTAMP, INTERVAL and RAW); convert other types (LOBs, LONG and
 user-defined types) explicitly with CAST or TO_CHAR.
 
-`oracle_scalar` is a convenience variant that returns the first column of the
-first result row as text (NULL if the query returns no rows).  That is useful
-to call remote functions, for example:
+**oracle_scalar in detail**
 
-    -- Oracle: apps.pkg.get_gl_code_combination_id@oebs('01.' || seg2 || ...)
-    SELECT oracle_scalar('oebs',
-           'SELECT apps.pkg.get_gl_code_combination_id(:1) FROM dual',
-           ARRAY['01.' || seg2 || '.' || seg3]);
+`oracle_scalar` returns the first column of the first result row as `text`,
+so cast the result to the type you need.  In assignments inside PL/pgSQL
+functions, this replaces the Oracle database link assignment
+`x := apps.pkg.func@dblink(...)`:
 
-To keep the migrated code readable, you can wrap such calls in small
-PostgreSQL functions with the appropriate argument and result types.
+    -- Oracle: DIST_CODE_COMBINATION_ID :=
+    --          apps.xxfm10x12b_1_iface_pkg.get_gl_code_combination_id@oebs(
+    --             '01.' || np_seg2 || '.' || np_seg3 || ...)
+    DIST_CODE_COMBINATION_ID := oracle_scalar('oebs',
+        'SELECT apps.xxfm10x12b_1_iface_pkg.get_gl_code_combination_id(:1)
+         FROM dual',
+        ARRAY['01.' || np_seg2 || '.' || np_seg3 || '.' || np_seg4
+              || '.' || np_seg5 || '.00.000.01'])::numeric;
+
+In a WHERE clause, this replaces a remote function call like
+`WHERE abc.rat@dblink(a, b, c) <> 0`; the function is called once per row of
+the local table, just like the Oracle database link call was:
+
+    SELECT * FROM docs d
+    WHERE oracle_scalar('oradb',
+          'SELECT abc.rat(:1, :2, :3) FROM dual',
+          ARRAY[d.cd_vf, to_char(d.datef, 'YYYY-MM-DD'), abc_valute])::numeric
+          <> 0;
+
+To keep migrated code readable, wrap such calls in small PostgreSQL functions
+with the appropriate argument and result types; the migrated statements then
+look almost like the original Oracle code:
+
+    CREATE FUNCTION abc_rat(cd_vf text, datef date, valute text)
+       RETURNS numeric
+       LANGUAGE sql
+    AS $$
+       SELECT oracle_scalar('oradb',
+              'SELECT abc.rat(:1, :2, :3) FROM dual',
+              ARRAY[cd_vf, to_char(datef, 'YYYY-MM-DD'), valute])::numeric
+    $$;
+
+    SELECT * FROM docs d WHERE abc_rat(d.cd_vf, d.datef, d.abc_valute) <> 0;
+
+If you need a single value as anything but `text`, either cast the result or
+use `oracle_query` with a column definition list, which gives you a properly
+typed result:
+
+    SELECT rating FROM oracle_query('oradb',
+           'SELECT abc.rat(:1, :2, :3) FROM dual',
+           ARRAY['A', '2026-01-01', 'USD']) AS q(rating numeric);
+
+**Shared caveats**
 
 The same caveats as for `oracle_execute` apply: the functions run with the
 permissions of the current user's mapping, and remote statements that modify
 data or have other side effects do not participate in oracle_fdw's two-phase
 transaction management, so an implicit COMMIT inside a called PL/SQL function
 cannot be rolled back with the local transaction.
-Also note that calling these functions once per row of a table causes one
+Also note that calling `oracle_scalar` once per row of a table causes one
 network round trip per call; for bulk processing it is more efficient to run
-a single query with `oracle_query` that computes all results at once.
+a single statement with `oracle_query` that computes all results at once.
 
 3 Options
 =========
