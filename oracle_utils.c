@@ -2486,6 +2486,7 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 
 	*nocc = 0;
 	used = oracleAlloc(maxnum > 0 ? (size_t)maxnum : 1);
+	memset(used, 0, maxnum > 0 ? (size_t)maxnum : 1);
 
 	while (*p != '\0')
 	{
