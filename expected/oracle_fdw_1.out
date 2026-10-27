@@ -1314,6 +1314,7 @@ SELECT oracle_scalar('oracle', 'SELECT scott.f_dml(:1) FROM dual', ARRAY['q']);
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query
 DETAIL:  ORA-14551: cannot perform a DML operation inside a query 
 ORA-06512: at "SCOTT.F_DML", line 3
+Help: https://docs.oracle.com/error-help/db/ora-14551/
 HINT:  use oracle_call to call functions that modify data
 -- invalid function names are rejected
 SELECT oracle_call('oracle', 'scott."f_dml"', 'x');
@@ -1363,7 +1364,8 @@ ERROR:  remote statement is not a query; use oracle_execute or oracle_exec for s
 -- remote errors are reported
 SELECT * FROM oracle_query('oracle', 'SELECT * FROM nosuchtable') AS q(n numeric);
 ERROR:  error describing query: OCIStmtExecute failed to describe remote query
-DETAIL:  ORA-00942: table or view does not exist
+DETAIL:  ORA-00942: table or view "SCOTT"."NOSUCHTABLE" does not exist
+Help: https://docs.oracle.com/error-help/db/ora-00942/
 SELECT oracle_execute('oracle', 'DROP PACKAGE scott.testpkg');
  oracle_execute 
 ----------------
