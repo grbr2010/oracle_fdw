@@ -1,6 +1,8 @@
 Foreign Data Wrapper for Oracle
 ===============================
 
+**English** | [Русский](README.ru.md)
+
 oracle_fdw is a PostgreSQL extension that provides a Foreign Data Wrapper for
 easy and efficient access to Oracle databases, including pushdown of WHERE
 conditions and required columns as well as comprehensive EXPLAIN support.
@@ -1260,4 +1262,4 @@ https://github.com/laurenz/oracle_fdw/issues
 This requires a GitHub account.
 
 Commercial support is available from
-[CYBERTEC PostgreSQL International GmbH][https://www.cybertec-postgresql.com].
+[CYBERTEC PostgreSQL International GmbH](https://www.cybertec-postgresql.com).
