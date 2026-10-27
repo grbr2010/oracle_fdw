@@ -1,0 +1,7 @@
+# Store and check out every text file with LF line endings.
+# Makes line handling independent of core.autocrlf/core.safecrlf on each machine
+# and silences the "CRLF will be replaced by LF" conversion messages.
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
