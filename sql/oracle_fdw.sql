@@ -703,6 +703,10 @@ SELECT oracle_scalar('oracle', 'SELECT :1 + :3 FROM dual', ARRAY['1', '2']);
 SELECT oracle_scalar('oracle', 'SELECT ''a:1'' FROM dual');
 SELECT oracle_scalar('oracle', 'SELECT ''a'''':1'' FROM dual');
 SELECT oracle_scalar('oracle', 'SELECT 2 /* :1 */ FROM dual');
+-- oracle_scalar stops after the first row and only defines the first column
+SELECT oracle_scalar('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END FROM dual CONNECT BY level <= 2');
+SELECT oracle_scalar('oracle', 'SELECT 42, TO_CLOB(''x'') FROM dual');
+SELECT oracle_scalar('oracle', 'SELECT NULL FROM dual');
 
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');

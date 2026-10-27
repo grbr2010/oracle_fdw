@@ -941,7 +941,10 @@ oracle_query(PG_FUNCTION_ARGS)
 /*
  * oracle_scalar
  * 		Execute a query on a foreign server and return the first column of
- * 		the first row as text (NULL if the query returned no rows).
+ * 		the first row as text (NULL if the query returned no rows or the
+ * 		first value is NULL).
+ * 		Only the first column is defined and the fetch stops after the first
+ * 		row, so the rest of the result is neither read nor converted.
  * 		Typically the statement is a remote function call, e.g.
  * 		SELECT oracle_scalar('srv', 'SELECT pkg.f(:1, :2) FROM dual', ARRAY[...]);
  */
@@ -952,7 +955,10 @@ oracle_scalar(PG_FUNCTION_ARGS)
 	char *stmt;
 	int nparams;
 	char **params;
-	struct dynResult *result;
+	oracleSession *session;
+	struct dynState *state;
+	char *values[1];
+	text *result = NULL;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
 		ereport(ERROR,
@@ -963,12 +969,35 @@ oracle_scalar(PG_FUNCTION_ARGS)
 	stmt = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	params = parseParamArray(fcinfo, 2, &nparams);
 
-	result = execDynamic(srvname, stmt, params, nparams);
+	session = oracleConnectServer(srvname);
 
-	if (result->nrows == 0 || result->values[0][0] == NULL)
+	PG_TRY();
+	{
+		/* define only the first column and fetch a single row */
+		state = oraclePrepareDynamic(session, stmt, nparams, params, 1, 1);
+		oracleStartDynamic(session, state);
+
+		if (oracleFetchDynamic(session, state, values) && values[0] != NULL)
+			result = cstring_to_text(values[0]);
+
+		oracleCloseDynamic(session, state);
+	}
+	PG_CATCH();
+	{
+		/* the error may have left the statement open on the cached session */
+		oracleCloseStatement(session);
+		pfree(session);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	/* free the session (connection will be cached) */
+	pfree(session);
+
+	if (result == NULL)
 		PG_RETURN_NULL();
 
-	PG_RETURN_TEXT_P(cstring_to_text(result->values[0][0]));
+	PG_RETURN_TEXT_P(result);
 }
 
 /*
