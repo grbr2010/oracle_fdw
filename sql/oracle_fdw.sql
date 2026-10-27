@@ -720,6 +720,72 @@ SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r bytea);
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r text);
 
+/* test oracle_call and oracle_exec calling remote functions that a query cannot call */
+
+-- create remote objects for the tests; drop leftovers from aborted runs
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP PROCEDURE scott.p_out');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP FUNCTION scott.f_dml');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP TABLE scott.dmltest PURGE');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+SELECT oracle_execute('oracle', 'CREATE TABLE scott.dmltest (v varchar2(10))');
+SELECT oracle_execute('oracle', E'CREATE OR REPLACE FUNCTION scott.f_dml(who varchar2) RETURN number IS\nBEGIN\n  INSERT INTO scott.dmltest VALUES (who);\n  RETURN 1;\nEND;');
+SELECT oracle_execute('oracle', 'CREATE OR REPLACE PROCEDURE scott.p_out(p_in IN varchar2, p_out OUT varchar2) IS BEGIN p_out := ''v'' || p_in; END;');
+
+-- a function that modifies data can be called and its DML is transactional
+SELECT oracle_call('oracle', 'scott.f_dml', 'x');
+BEGIN;
+SELECT oracle_call('oracle', 'scott.f_dml', 'y');
+ROLLBACK;
+SELECT v FROM oracle_query('oracle', 'SELECT v FROM scott.dmltest') AS q(v text);
+-- a remote DML in an aborted subtransaction is rolled back
+DO
+$$BEGIN
+   PERFORM oracle_call('oracle', 'scott.f_dml', 'z');
+   RAISE EXCEPTION 'abort';
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+SELECT v FROM oracle_query('oracle', 'SELECT v FROM scott.dmltest') AS q(v text);
+-- a procedure with an OUT parameter returns its result
+SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7');
+-- a block without :p0 must be run with oracle_execute
+SELECT oracle_exec('oracle', 'BEGIN NULL; END;');
+-- the number of bind placeholders must match the arguments
+SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7', '8');
+-- calling a data-modifying function in a query context gets a hint
+SELECT oracle_scalar('oracle', 'SELECT scott.f_dml(:1) FROM dual', ARRAY['q']);
+-- invalid function names are rejected
+SELECT oracle_call('oracle', 'scott."f_dml"', 'x');
+-- PUBLIC has no privileges on the functions that run arbitrary remote SQL
+DROP ROLE IF EXISTS noprivs;
+CREATE ROLE noprivs;
+SELECT has_function_privilege('noprivs', 'oracle_query(name,text,text[])', 'EXECUTE') q,
+       has_function_privilege('noprivs', 'oracle_scalar(name,text,text[])', 'EXECUTE') s,
+       has_function_privilege('noprivs', 'oracle_call(name,text,text[])', 'EXECUTE') c,
+       has_function_privilege('noprivs', 'oracle_exec(name,text,text[])', 'EXECUTE') e;
+
+SELECT oracle_execute('oracle', 'DROP PROCEDURE scott.p_out');
+SELECT oracle_execute('oracle', 'DROP FUNCTION scott.f_dml');
+SELECT oracle_execute('oracle', 'DROP TABLE scott.dmltest PURGE');
+
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
 -- the number of result columns must match the column definition list

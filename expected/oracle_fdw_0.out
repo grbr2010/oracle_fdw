@@ -1190,6 +1190,137 @@ SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS
  4142
 (1 row)
 
+/* test oracle_call and oracle_exec calling remote functions that a query cannot call */
+-- create remote objects for the tests; drop leftovers from aborted runs
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP PROCEDURE scott.p_out');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP FUNCTION scott.f_dml');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP TABLE scott.dmltest PURGE');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+SELECT oracle_execute('oracle', 'CREATE TABLE scott.dmltest (v varchar2(10))');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', E'CREATE OR REPLACE FUNCTION scott.f_dml(who varchar2) RETURN number IS\nBEGIN\n  INSERT INTO scott.dmltest VALUES (who);\n  RETURN 1;\nEND;');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'CREATE OR REPLACE PROCEDURE scott.p_out(p_in IN varchar2, p_out OUT varchar2) IS BEGIN p_out := ''v'' || p_in; END;');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+-- a function that modifies data can be called and its DML is transactional
+SELECT oracle_call('oracle', 'scott.f_dml', 'x');
+ oracle_call 
+-------------
+ 1
+(1 row)
+
+BEGIN;
+SELECT oracle_call('oracle', 'scott.f_dml', 'y');
+ oracle_call 
+-------------
+ 1
+(1 row)
+
+ROLLBACK;
+SELECT v FROM oracle_query('oracle', 'SELECT v FROM scott.dmltest') AS q(v text);
+ v 
+---
+ x
+(1 row)
+
+-- a remote DML in an aborted subtransaction is rolled back
+DO
+$$BEGIN
+   PERFORM oracle_call('oracle', 'scott.f_dml', 'z');
+   RAISE EXCEPTION 'abort';
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+SELECT v FROM oracle_query('oracle', 'SELECT v FROM scott.dmltest') AS q(v text);
+ v 
+---
+ x
+(1 row)
+
+-- a procedure with an OUT parameter returns its result
+SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7');
+ oracle_exec 
+-------------
+ v7
+(1 row)
+
+-- a block without :p0 must be run with oracle_execute
+SELECT oracle_exec('oracle', 'BEGIN NULL; END;');
+ERROR:  the PL/SQL block does not assign a value to the bind placeholder :p0
+HINT:  use oracle_execute to execute a block that returns no result
+-- the number of bind placeholders must match the arguments
+SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7', '8');
+ERROR:  the number of bind variables in the PL/SQL block (1) does not match the number of parameters (2)
+-- calling a data-modifying function in a query context gets a hint
+SELECT oracle_scalar('oracle', 'SELECT scott.f_dml(:1) FROM dual', ARRAY['q']);
+ERROR:  error executing query: OCIStmtExecute failed to execute remote query
+DETAIL:  ORA-14551: cannot perform a DML operation inside a query 
+ORA-06512: at "SCOTT.F_DML", line 3
+HINT:  use oracle_call to call functions that modify data
+-- invalid function names are rejected
+SELECT oracle_call('oracle', 'scott."f_dml"', 'x');
+ERROR:  invalid function name "scott."f_dml"": name segments must be unquoted identifiers
+HINT:  use oracle_exec to call functions with quoted names
+-- PUBLIC has no privileges on the functions that run arbitrary remote SQL
+DROP ROLE IF EXISTS noprivs;
+CREATE ROLE noprivs;
+SELECT has_function_privilege('noprivs', 'oracle_query(name,text,text[])', 'EXECUTE') q,
+       has_function_privilege('noprivs', 'oracle_scalar(name,text,text[])', 'EXECUTE') s,
+       has_function_privilege('noprivs', 'oracle_call(name,text,text[])', 'EXECUTE') c,
+       has_function_privilege('noprivs', 'oracle_exec(name,text,text[])', 'EXECUTE') e;
+ q | s | c | e 
+---+---+---+---
+ f | f | f | f
+(1 row)
+
+SELECT oracle_execute('oracle', 'DROP PROCEDURE scott.p_out');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'DROP FUNCTION scott.f_dml');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
+SELECT oracle_execute('oracle', 'DROP TABLE scott.dmltest PURGE');
+ oracle_execute 
+----------------
+ 
+(1 row)
+
 -- errors raised inside the PL/SQL code are reported
 SELECT oracle_scalar('oracle', 'SELECT scott.testpkg.boom FROM dual');
 ERROR:  error executing query: OCIStmtExecute failed to execute remote query

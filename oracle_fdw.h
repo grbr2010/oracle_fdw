@@ -246,6 +246,7 @@ extern void oraclePrepareQuery(oracleSession *session, const char *query, const 
 extern unsigned int oracleExecuteQuery(oracleSession *session, const struct oraTable *oraTable, struct paramDesc *paramList, unsigned int prefetch);
 extern unsigned int oracleFetchNext(oracleSession *session, unsigned int prefetch);
 extern void oracleExecuteCall(oracleSession *session, char * const stmt);
+extern char *oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args);
 extern struct dynState *oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch, int define_cols);
 extern void oracleStartDynamic(oracleSession *session, struct dynState *state);
 extern int oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values);
