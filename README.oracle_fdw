@@ -211,6 +211,58 @@ user's mapping.  Grant `EXECUTE` on them to the roles that need it:
 `oracle_execute` keeps its default `PUBLIC` privilege for backward
 compatibility with existing installations.
 
+**Why there are four functions**
+
+The four functions cover two independent choices: the shape of the result
+and the context in which Oracle executes the statement.
+
+| Result            | Query context       | PL/SQL context          |
+|-------------------|---------------------|-------------------------|
+| Set of rows       | `oracle_query`      | —                       |
+| A single value    | `oracle_scalar`     | `oracle_call`, `oracle_exec` |
+
+The query context is the normal SQL context: Oracle decides whether the
+statement is a query and rejects DML with `ORA-14551`.  The PL/SQL context
+executes an anonymous block, so it can call functions that modify data and
+procedures with OUT parameters.
+
+Internally there are only two implementations.  `oracle_query` and
+`oracle_scalar` share the dynamic-query code, while `oracle_call` and
+`oracle_exec` share the anonymous-block code.  The four public functions
+exist because their contracts differ:
+
+- `oracle_query` is the only function that can return a set of rows and
+  columns.  Since the result types are not known when the function is
+  defined, it requires a column definition list at the call site.
+- `oracle_scalar` returns one value as `text` without a column definition
+  list and stops after the first row and the first column.  It is not
+  equivalent to `oracle_query ... LIMIT 1`: `LIMIT` does not stop the remote
+  fetch because PostgreSQL materializes the whole result first (see **LIMIT
+  and result materialization**), and `oracle_scalar` also avoids defining
+  the later columns.
+- `oracle_call` is the convenient, checked form for a function with a
+  simple name.  It builds the block
+  `BEGIN :p0 := func(:p1, ...); END;` and validates the function name.
+- `oracle_exec` is the general form for procedures with OUT parameters,
+  quoted or overloaded names and arbitrary PL/SQL blocks.  It accepts the
+  block as written and only checks the bind placeholders.
+
+`oracle_call` is a convenience wrapper over the same mechanism as
+`oracle_exec`.  `oracle_exec` cannot be removed without losing procedures
+with OUT parameters and arbitrary blocks, while `oracle_call` could be
+replaced by writing the block manually.  Keeping both makes the common
+function call short and safe and still leaves the general escape hatch.
+
+Use this rule of thumb:
+
+1. The statement returns many rows or columns: `oracle_query`.
+2. The statement returns a single value and does not modify data:
+   `oracle_scalar`.
+3. You call a function with a simple name that may modify data:
+   `oracle_call`.
+4. You call a procedure with OUT parameters, a quoted or overloaded name,
+   or an arbitrary PL/SQL block: `oracle_exec`.
+
 **oracle_query in detail**
 
 Since the result types cannot be determined at function definition time, you
