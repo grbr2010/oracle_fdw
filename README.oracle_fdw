@@ -251,6 +251,44 @@ user-defined types) explicitly with CAST or TO_CHAR.
 A RAW column is transferred as a hex string: declare the result column as
 `text` to get the hex representation, or as `bytea` to get the binary value.
 
+The placeholders in the statement are positional `:1`, `:2`, ... and must be
+consecutive; a placeholder may be repeated.  Placeholders inside ordinary
+string literals, quoted identifiers, comments and q-quoted strings (`q'...'`
+and `nq'...'`) are not bound.  Named placeholders such as `:name` are rejected
+with an error, and the number of placeholders is cross-checked against the
+bind count reported by Oracle before the statement is executed.
+
+**LIMIT and result materialization**
+
+`oracle_query` is a value-per-call set-returning function.  PostgreSQL's
+executor calls it repeatedly and stores all returned rows in a tuplestore
+before the surrounding query, including any `LIMIT` or `OFFSET`, is
+evaluated.  The tuplestore can spill to disk, so PostgreSQL memory use stays
+bounded, but the whole result is still fetched from Oracle and converted to
+PostgreSQL values.
+
+Consequently, `LIMIT` only restricts how many rows the outer query returns;
+it does not reduce the number of rows read from Oracle, the network traffic,
+or the work done by the remote server.  It also does not prevent errors in
+rows beyond the limit.  For example, this statement still fails:
+
+    SELECT * FROM oracle_query('oradb',
+               'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END
+                FROM dual CONNECT BY level <= 2') AS q(n numeric)
+    LIMIT 1;
+
+The error is `ORA-01476: divisor is equal to zero`, because PostgreSQL
+materializes the second row before it applies `LIMIT`.  For the same reason,
+`LIMIT` does not close the remote cursor early: the cursor is closed when the
+result is exhausted, when the query is canceled, or when an error occurs.
+
+If you need to restrict the amount of work on the Oracle server, put the
+restriction into the remote statement itself, for example with
+`WHERE ROWNUM <= 10`, `FETCH FIRST 10 ROWS ONLY` (Oracle 12c and later), or a
+regular `WHERE` condition.  Such a statement returns fewer rows, so fewer rows
+are transferred and materialized.  `oracle_scalar` does not have this
+problem: it defines only the first column and stops after the first row.
+
 **oracle_scalar in detail**
 
 `oracle_scalar` returns the first column of the first result row as `text`,
@@ -344,6 +382,12 @@ Use `oracle_exec` for procedures with OUT parameters and for functions that
 need quoted names.  Use `oracle_execute` for blocks that return no result;
 `oracle_exec` rejects a block that does not assign `:p0`.
 
+The block must assign its result to `:p0`; the remaining placeholders must be
+`:p1`, ..., `:pN` in order, and a placeholder may be repeated.  A block that
+does not use `:p0` is rejected with a hint to use `oracle_execute`; `:p00` is
+treated as a different, named placeholder and rejected.  The number of bind
+variables is cross-checked against the count reported by Oracle.
+
 The result must be at most 32767 bytes long; the same transaction caveats
 as for `oracle_call` apply.
 
@@ -355,12 +399,8 @@ data or have other side effects do not participate in oracle_fdw's two-phase
 transaction management, so an implicit COMMIT inside a called PL/SQL function
 cannot be rolled back with the local transaction.
 
-`oracle_query` runs with the regular semantics of a FROM-clause function:
-the executor reads the whole result into a tuplestore that can spill to
-disk, so memory use stays bounded no matter how large the result is.
-This also means that `LIMIT` does not reduce the amount of data read from
-the remote server, and that the remote cursor is closed only when the query
-ends, is canceled or fails.
+See **LIMIT and result materialization** above for the memory use, `LIMIT`
+behavior and cursor lifetime of `oracle_query`.
 Also note that calling `oracle_scalar` once per row of a table causes one
 network round trip per call; for bulk processing it is more efficient to run
 a single statement with `oracle_query` that computes all results at once.

@@ -246,7 +246,7 @@ extern void oraclePrepareQuery(oracleSession *session, const char *query, const 
 extern unsigned int oracleExecuteQuery(oracleSession *session, const struct oraTable *oraTable, struct paramDesc *paramList, unsigned int prefetch);
 extern unsigned int oracleFetchNext(oracleSession *session, unsigned int prefetch);
 extern void oracleExecuteCall(oracleSession *session, char * const stmt);
-extern char *oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args);
+extern char *oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args, int nbinds);
 extern struct dynState *oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch, int define_cols);
 extern void oracleStartDynamic(oracleSession *session, struct dynState *state);
 extern int oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values);
@@ -272,6 +272,7 @@ extern void oracleSetHandlers(void);
 extern void oracleError_d(oraError sqlstate, const char *message, const char *detail);
 extern void oracleError_sd(oraError sqlstate, const char *message, const char *arg, const char *detail);
 extern void oracleError_ssdh(oraError sqlstate, const char *message, const char *arg1, const char* arg2, const char *detail, const char *hint);
+extern void oracleError_ih(oraError sqlstate, const char *message, int arg, const char *hint);
 extern void oracleError_ii(oraError sqlstate, const char *message, int arg1, int arg2);
 extern void oracleError_i(oraError sqlstate, const char *message, int arg);
 extern void oracleError(oraError sqlstate, const char *message);

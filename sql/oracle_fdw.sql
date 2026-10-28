@@ -703,22 +703,43 @@ SELECT oracle_scalar('oracle', 'SELECT :1 + :3 FROM dual', ARRAY['1', '2']);
 SELECT oracle_scalar('oracle', 'SELECT ''a:1'' FROM dual');
 SELECT oracle_scalar('oracle', 'SELECT ''a'''':1'' FROM dual');
 SELECT oracle_scalar('oracle', 'SELECT 2 /* :1 */ FROM dual');
+-- alternative quoting (q'...' and nq'...') is a string literal, too
+SELECT oracle_scalar('oracle', $q$SELECT q'[it's :1]' FROM dual$q$);
+SELECT oracle_scalar('oracle', $q$SELECT nq'[it's :1]' FROM dual$q$);
+SELECT oracle_scalar('oracle', $q$SELECT q'{a :1}' FROM dual$q$);
+SELECT oracle_scalar('oracle', $q$SELECT q'(a :1)' FROM dual$q$);
+SELECT oracle_scalar('oracle', $q$SELECT q'<a :1>' FROM dual$q$);
+SELECT oracle_scalar('oracle', $q$SELECT q'!a :1!' FROM dual$q$);
+-- a real placeholder outside the q-quote is still bound
+SELECT oracle_scalar('oracle', $q$SELECT q'[a :1]' || :1 FROM dual$q$, ARRAY['X']);
+-- a q'...' sequence inside an ordinary string literal is not a q-quote
+SELECT oracle_scalar('oracle', $q$SELECT 'q''[a:1]' FROM dual$q$);
 -- oracle_scalar stops after the first row and only defines the first column
 SELECT oracle_scalar('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END FROM dual CONNECT BY level <= 2');
 SELECT oracle_scalar('oracle', 'SELECT 42, TO_CLOB(''x'') FROM dual');
 SELECT oracle_scalar('oracle', 'SELECT NULL FROM dual');
--- oracle_query streams the rows into a spilling tuplestore; the whole result
--- is read, but the remote cursor is closed when the query is done or aborted
+-- oracle_query has the semantics of a value-per-call set-returning
+-- function: PostgreSQL materializes the whole result into a tuplestore (which
+-- can spill to disk) before LIMIT is applied, so the whole result is read and
+-- the remote cursor is closed when the query is done, canceled or fails.
 SELECT * FROM oracle_query('oracle', 'SELECT level n FROM dual CONNECT BY level <= 5') AS q(n numeric) LIMIT 1;
 SELECT oracle_scalar('oracle', 'SELECT 99 FROM dual');
+-- therefore LIMIT cannot suppress an error in a later row
+SELECT * FROM oracle_query('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END n FROM dual CONNECT BY level <= 2') AS q(n numeric) LIMIT 1;
+SELECT oracle_scalar('oracle', 'SELECT 96 FROM dual');
+-- an error after prepare closes the cursor and leaves the session usable
+SELECT * FROM oracle_query('oracle', 'SELECT 1 FROM dual WHERE :1 = 1') AS q(n numeric);
+SELECT oracle_scalar('oracle', 'SELECT 95 FROM dual');
 -- the column definition list is checked before the statement is executed
 SELECT * FROM oracle_query('oracle', 'SELECT 1, 1/0 FROM dual') AS q(a numeric);
 -- an error during the fetch is reported and leaves the session usable
 SELECT * FROM oracle_query('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END n FROM dual CONNECT BY level <= 2') AS q(n numeric);
 SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
--- RAW columns are transferred as hex; as bytea they need the "\x" prefix
+-- RAW columns are transferred as hex; as bytea they need the "\x" prefix,
+-- and a NULL RAW value becomes a NULL bytea value
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r bytea);
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r text);
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(NULL AS RAW(1)) r FROM dual') AS q(r bytea);
 -- data types and Unicode in the select list (TIMESTAMPTZ is declared text
 -- because its rendering depends on the session time zone)
 SELECT * FROM oracle_query('oracle',
@@ -787,6 +808,20 @@ SELECT v FROM oracle_query('oracle', 'SELECT v FROM scott.dmltest') AS q(v text)
 SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7');
 -- a block without :p0 must be run with oracle_execute
 SELECT oracle_exec('oracle', 'BEGIN NULL; END;');
+-- a block that uses :p1 but does not assign :p0 gets the same hint, with or
+-- without arguments
+SELECT oracle_exec('oracle', 'BEGIN :p1 := ''x''; END;');
+SELECT oracle_exec('oracle', 'BEGIN :p1 := ''x''; END;', 'a');
+-- :p00 is a named placeholder, not :p0
+SELECT oracle_exec('oracle', 'BEGIN :p0 := :p00; END;', 'x');
+-- repeated binds are allowed; Oracle counts distinct bind variables
+SELECT oracle_exec('oracle', 'BEGIN :p0 := :p1 || :p1; END;', 'a');
+SELECT oracle_exec('oracle', 'BEGIN :p0 := :p1; :p0 := :p0 || :p1; END;', 'a');
+-- NULL and empty arguments are passed as SQL NULL and an empty string
+SELECT oracle_call('oracle', 'scott.testpkg.nvl_len', NULL);
+SELECT oracle_call('oracle', 'scott.testpkg.nvl_len', '');
+SELECT oracle_exec('oracle', 'BEGIN :p0 := :p1; END;', NULL) IS NULL AS is_null;
+SELECT oracle_exec('oracle', 'BEGIN :p0 := ''v'' || :p1; END;', '');
 -- the number of bind placeholders must match the arguments
 SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7', '8');
 -- calling a data-modifying function in a query context gets a hint
