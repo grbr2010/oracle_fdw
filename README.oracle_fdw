@@ -1004,9 +1004,9 @@ If you encounter problems while using such a PostgreSQL-derived server,
 please try with the original version before reporting an issue.
 
 Oracle client version 11.2 or better is required.
-Note that the regression test matrix only covers Oracle client 19 and Oracle
-server 18, 21 and 23; Oracle 11.2 remains the documented lower bound as an
-inherited commitment from upstream oracle_fdw, but it is not covered by
+Note that the regression test matrix only covers Oracle clients 19 and 23 and
+Oracle server 18, 21 and 23; Oracle 11.2 remains the documented lower bound as
+an inherited commitment from upstream oracle_fdw, but it is not covered by
 tests here.
 oracle_fdw can be built and used with Oracle Instant Client as well as with
 Oracle Client and Server installations installed with Universal Installer.
