@@ -427,7 +427,7 @@ EXPLAIN (COSTS off) SELECT id FROM typetest1 WHERE vc = ANY (ARRAY['short', (SEL
 --------------------------------------------------------------------------------------------------------------------------------------------------------
  Foreign Scan on typetest1
    Oracle query: SELECT /*e4d3d23eb05ef98f*/ r1."ID", r1."VC" FROM "TYPETEST1" r1 WHERE (r1."VC" IN ('short', :p00001)) ORDER BY r1."ID" ASC NULLS LAST
-   InitPlan 1
+   InitPlan 1 (returns $0)
      ->  Result
 (4 rows)
 
@@ -884,7 +884,7 @@ CREATE FUNCTION f_typetest1() RETURNS TABLE (id integer)
 SET SESSION AUTHORIZATION duff;
 -- this should fail
 SELECT id FROM typetest1 ORDER BY id;
-ERROR:  user mapping not found for user "duff", server "oracle"
+ERROR:  user mapping not found for "duff"
 -- these should succeed
 SELECT id FROM v_typetest1 ORDER BY id;
  id 
@@ -1134,6 +1134,57 @@ SELECT oracle_scalar('oracle', 'SELECT 2 /* :1 */ FROM dual');
  2
 (1 row)
 
+-- alternative quoting (q'...' and nq'...') is a string literal, too
+SELECT oracle_scalar('oracle', $q$SELECT q'[it's :1]' FROM dual$q$);
+ oracle_scalar 
+---------------
+ it's :1
+(1 row)
+
+SELECT oracle_scalar('oracle', $q$SELECT nq'[it's :1]' FROM dual$q$);
+ oracle_scalar 
+---------------
+ it's :1
+(1 row)
+
+SELECT oracle_scalar('oracle', $q$SELECT q'{a :1}' FROM dual$q$);
+ oracle_scalar 
+---------------
+ a :1
+(1 row)
+
+SELECT oracle_scalar('oracle', $q$SELECT q'(a :1)' FROM dual$q$);
+ oracle_scalar 
+---------------
+ a :1
+(1 row)
+
+SELECT oracle_scalar('oracle', $q$SELECT q'<a :1>' FROM dual$q$);
+ oracle_scalar 
+---------------
+ a :1
+(1 row)
+
+SELECT oracle_scalar('oracle', $q$SELECT q'!a :1!' FROM dual$q$);
+ oracle_scalar 
+---------------
+ a :1
+(1 row)
+
+-- a real placeholder outside the q-quote is still bound
+SELECT oracle_scalar('oracle', $q$SELECT q'[a :1]' || :1 FROM dual$q$, ARRAY['X']);
+ oracle_scalar 
+---------------
+ a :1X
+(1 row)
+
+-- a q'...' sequence inside an ordinary string literal is not a q-quote
+SELECT oracle_scalar('oracle', $q$SELECT 'q''[a:1]' FROM dual$q$);
+ oracle_scalar 
+---------------
+ q'[a:1]
+(1 row)
+
 -- oracle_scalar stops after the first row and only defines the first column
 SELECT oracle_scalar('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END FROM dual CONNECT BY level <= 2');
  oracle_scalar 
@@ -1153,8 +1204,10 @@ SELECT oracle_scalar('oracle', 'SELECT NULL FROM dual');
  
 (1 row)
 
--- oracle_query streams the rows into a spilling tuplestore; the whole result
--- is read, but the remote cursor is closed when the query is done or aborted
+-- oracle_query has the semantics of a value-per-call set-returning
+-- function: PostgreSQL materializes the whole result into a tuplestore (which
+-- can spill to disk) before LIMIT is applied, so the whole result is read and
+-- the remote cursor is closed when the query is done, canceled or fails.
 SELECT * FROM oracle_query('oracle', 'SELECT level n FROM dual CONNECT BY level <= 5') AS q(n numeric) LIMIT 1;
  n 
 ---
@@ -1165,6 +1218,26 @@ SELECT oracle_scalar('oracle', 'SELECT 99 FROM dual');
  oracle_scalar 
 ---------------
  99
+(1 row)
+
+-- therefore LIMIT cannot suppress an error in a later row
+SELECT * FROM oracle_query('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END n FROM dual CONNECT BY level <= 2') AS q(n numeric) LIMIT 1;
+ERROR:  error fetching result: OCIStmtFetch2 failed to fetch next result rows
+DETAIL:  ORA-01476: divisor is equal to zero
+Help: https://docs.oracle.com/error-help/db/ora-01476/
+SELECT oracle_scalar('oracle', 'SELECT 96 FROM dual');
+ oracle_scalar 
+---------------
+ 96
+(1 row)
+
+-- an error after prepare closes the cursor and leaves the session usable
+SELECT * FROM oracle_query('oracle', 'SELECT 1 FROM dual WHERE :1 = 1') AS q(n numeric);
+ERROR:  the remote query uses the bind placeholder :1, but not enough bind parameters were supplied
+SELECT oracle_scalar('oracle', 'SELECT 95 FROM dual');
+ oracle_scalar 
+---------------
+ 95
 (1 row)
 
 -- the column definition list is checked before the statement is executed
@@ -1181,7 +1254,8 @@ SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
  98
 (1 row)
 
--- RAW columns are transferred as hex; as bytea they need the "\x" prefix
+-- RAW columns are transferred as hex; as bytea they need the "\x" prefix,
+-- and a NULL RAW value becomes a NULL bytea value
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r bytea);
    r    
 --------
@@ -1192,6 +1266,12 @@ SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS
   r   
 ------
  4142
+(1 row)
+
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(NULL AS RAW(1)) r FROM dual') AS q(r bytea);
+ r 
+---
+ 
 (1 row)
 
 -- data types and Unicode in the select list (TIMESTAMPTZ is declared text
@@ -1306,6 +1386,56 @@ SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7');
 SELECT oracle_exec('oracle', 'BEGIN NULL; END;');
 ERROR:  the PL/SQL block does not assign a value to the bind placeholder :p0
 HINT:  use oracle_execute to execute a block that returns no result
+-- a block that uses :p1 but does not assign :p0 gets the same hint, with or
+-- without arguments
+SELECT oracle_exec('oracle', 'BEGIN :p1 := ''x''; END;');
+ERROR:  the PL/SQL block does not assign a value to the bind placeholder :p0
+HINT:  use oracle_execute to execute a block that returns no result
+SELECT oracle_exec('oracle', 'BEGIN :p1 := ''x''; END;', 'a');
+ERROR:  the PL/SQL block does not assign a value to the bind placeholder :p0
+HINT:  use oracle_execute to execute a block that returns no result
+-- :p00 is a named placeholder, not :p0
+SELECT oracle_exec('oracle', 'BEGIN :p0 := :p00; END;', 'x');
+ERROR:  the PL/SQL block uses the named bind placeholder :p00; only the positional bind placeholders :p0, :p1, ... are supported
+DETAIL:  bind parameter values are passed as an array of strings
+-- repeated binds are allowed; Oracle counts distinct bind variables
+SELECT oracle_exec('oracle', 'BEGIN :p0 := :p1 || :p1; END;', 'a');
+ oracle_exec 
+-------------
+ aa
+(1 row)
+
+SELECT oracle_exec('oracle', 'BEGIN :p0 := :p1; :p0 := :p0 || :p1; END;', 'a');
+ oracle_exec 
+-------------
+ aa
+(1 row)
+
+-- NULL and empty arguments are passed as SQL NULL and an empty string
+SELECT oracle_call('oracle', 'scott.testpkg.nvl_len', NULL);
+ oracle_call 
+-------------
+ 0
+(1 row)
+
+SELECT oracle_call('oracle', 'scott.testpkg.nvl_len', '');
+ oracle_call 
+-------------
+ 0
+(1 row)
+
+SELECT oracle_exec('oracle', 'BEGIN :p0 := :p1; END;', NULL) IS NULL AS is_null;
+ is_null 
+---------
+ t
+(1 row)
+
+SELECT oracle_exec('oracle', 'BEGIN :p0 := ''v'' || :p1; END;', '');
+ oracle_exec 
+-------------
+ v
+(1 row)
+
 -- the number of bind placeholders must match the arguments
 SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7', '8');
 ERROR:  the number of bind variables in the PL/SQL block (1) does not match the number of parameters (2)

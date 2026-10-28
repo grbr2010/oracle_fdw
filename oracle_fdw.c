@@ -826,8 +826,13 @@ queryCleanup(void *arg)
 {
 	struct queryState *qstate = (struct queryState *)arg;
 
-	if (!qstate->done && qstate->state != NULL)
-		oracleCloseDynamic(qstate->session, qstate->state);
+	if (!qstate->done && qstate->session != NULL)
+	{
+		if (qstate->state != NULL)
+			oracleCloseDynamic(qstate->session, qstate->state);
+		else
+			oracleCloseStatement(qstate->session);
+	}
 
 	qstate->done = 1;
 }
@@ -911,8 +916,15 @@ oracle_query(PG_FUNCTION_ARGS)
 		}
 		PG_CATCH();
 		{
+			/*
+			 * oraclePrepareDynamic can fail after it has registered the
+			 * statement handle but before qstate->state is assigned, so
+			 * close the open statement in that case as well.
+			 */
 			if (qstate->state != NULL)
 				oracleCloseDynamic(qstate->session, qstate->state);
+			else
+				oracleCloseStatement(qstate->session);
 			qstate->done = 1;
 			PG_RE_THROW();
 		}
@@ -1136,7 +1148,7 @@ oracle_call(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
-		result = oracleCallFunction(session, buf.data, nargs, args);
+		result = oracleCallFunction(session, buf.data, nargs, args, nargs + 1);
 	}
 	PG_CATCH();
 	{
@@ -1187,12 +1199,6 @@ oracle_exec(PG_FUNCTION_ARGS)
 	/* the block must assign its result to :p0 and use :p1 ... :pN */
 	maxpl = oracleCheckPlaceholders(block, 0, nargs + 1, 1, &nocc);
 
-	if (maxpl < 0)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				errmsg("the PL/SQL block does not assign a value to the bind placeholder :p0"),
-				errhint("use oracle_execute to execute a block that returns no result")));
-
 	if (maxpl != nargs)
 		oracleError_ii(FDW_UNABLE_TO_CREATE_EXECUTION,
 			"the number of bind variables in the PL/SQL block (%d) does not match the number of parameters (%d)",
@@ -1202,7 +1208,7 @@ oracle_exec(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
-		result = oracleCallFunction(session, block, nargs, args);
+		result = oracleCallFunction(session, block, nargs, args, nargs + 1);
 	}
 	PG_CATCH();
 	{
@@ -7723,6 +7729,19 @@ oracleError_ssdh(oraError sqlstate, const char *message, const char *arg1, const
 			(errcode(to_sqlstate(sqlstate)),
 			errmsg(message, arg1, arg2),
 			errdetail("%s", detail),
+			errhint("%s", hint)));
+}
+
+/*
+ * oracleError_ih
+ * 		Report a PostgreSQL error with an integer argument and a hint.
+ */
+void
+oracleError_ih(oraError sqlstate, const char *message, int arg, const char *hint)
+{
+	ereport(ERROR,
+			(errcode(to_sqlstate(sqlstate)),
+			errmsg(message, arg),
 			errhint("%s", hint)));
 }
 

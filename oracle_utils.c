@@ -2354,17 +2354,21 @@ oracleExecuteCall(oracleSession *session, char * const stmt)
  * 		Execute an anonymous PL/SQL block that has one output bind ":p0"
  * 		(a string of up to 32767 bytes) and "nargs" input binds ":p1" to
  * 		":pN" (NULL array elements are SQL NULL).
+ * 		The caller has to validate the bind placeholders in the block with
+ * 		oracleCheckPlaceholders and pass the number of distinct bind
+ * 		variables as "nbinds" (normally nargs + 1); that number is
+ * 		cross-checked against the bind count reported by Oracle.
  * 		Returns the value of ":p0" (allocated with oracleAlloc in the
  * 		current memory context; NULL for SQL NULL), the statement is closed
- * 		before returning.  The caller has to validate the bind placeholders
- * 		in the block with oracleCheckPlaceholders.
+ * 		before returning.
  */
 char *
-oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args)
+oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args, int nbinds)
 {
 	OCIBind *bndhp = NULL;
 	sb2 out_ind = 0;
 	ub2 out_len = 0;
+	ub4 bind_count;
 	sb2 *in_ind = NULL;
 	char *outbuf;
 	char *result;
@@ -2388,6 +2392,25 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 
 	/* register statement handle */
 	registerStmt(session->stmthp, session->envp->envhp, session->connp);
+
+	/*
+	 * Cross-check the lexical placeholder analysis against the bind count
+	 * reported by Oracle.  For PL/SQL blocks Oracle counts distinct bind
+	 * variables, not occurrences, so repeated placeholders do not increase
+	 * the count.  A mismatch means that the parser did not understand the
+	 * block, so report a clear error instead of a confusing OCI bind error
+	 * later.
+	 */
+	if (checkerr(
+		OCIAttrGet((dvoid *)session->stmthp, (ub4)OCI_HTYPE_STMT,
+			(dvoid *)&bind_count, (ub4 *)0, (ub4)OCI_ATTR_BIND_COUNT, session->envp->errhp),
+		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) == OCI_SUCCESS
+		&& bind_count != (ub4)nbinds)
+	{
+		oracleError_ii(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"the number of bind variables in the PL/SQL block reported by Oracle (%d) does not match the expected number (%d)",
+			(int)bind_count, nbinds);
+	}
 
 	/* bind the output parameter :p0 (PL/SQL VARCHAR2 can hold 32767 bytes) */
 	outbuf = oracleAlloc(32768);
@@ -2462,16 +2485,30 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 }
 
 /*
+ * isOracleIdentChar
+ * 		Is "c" a character that can be part of an unquoted Oracle identifier?
+ */
+static int
+isOracleIdentChar(char c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+		|| (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '#';
+}
+
+/*
  * oracleCheckPlaceholders
  * 		Check the bind placeholders in "query".
  * 		Placeholders inside string literals, quoted identifiers and comments
  * 		are ignored; the same is true for the PL/SQL assignment operator (":=")
- * 		and for double colons.
+ * 		and for double colons.  Alternative quoting (q'...' and nq'...') is
+ * 		recognized as well.
  * 		Each placeholder must have the form :N (or :pN if "p_style" is true),
  * 		where N is an integer between "base" and "base + maxnum - 1"; the
  * 		distinct placeholder numbers must form a gap-free sequence starting
  * 		with "base".  A placeholder may appear more than once.
  * 		Named placeholders are rejected.
+ * 		If "p_style" is true, the placeholder :p0 (the result bind) must be
+ * 		present; missing :p0 is reported with a hint to use oracle_execute.
  * 		Returns the highest placeholder number found (base - 1 if there is
  * 		none) and stores the number of placeholder occurrences in *nocc.
  */
@@ -2482,6 +2519,7 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 	char *used;  /* used[i - base] is nonzero if the placeholder number i occurs */
 	char name[128];
 	int max = base - 1;
+	int overflow = -1;  /* first placeholder number outside the allowed range */
 	int i, n;
 
 	*nocc = 0;
@@ -2490,6 +2528,42 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 
 	while (*p != '\0')
 	{
+		/*
+		 * Alternative quoting: q'...' or nq'...'.  The closing delimiter is
+		 * the same character, except that [] {} () <> are matched in pairs.
+		 * The introducer must not be part of an identifier.
+		 */
+		if ((*p == 'q' || *p == 'Q'
+			 || ((*p == 'n' || *p == 'N') && (p[1] == 'q' || p[1] == 'Q')))
+			&& (p == query || !isOracleIdentChar(p[-1])))
+		{
+			const char *q = (*p == 'n' || *p == 'N') ? p + 1 : p;
+
+			/* Oracle does not allow whitespace as the quote delimiter */
+			if (q[1] == '\'' && q[2] != '\0'
+				&& q[2] != ' ' && q[2] != '\t' && q[2] != '\n' && q[2] != '\r')
+			{
+				char delim = q[2];
+				char close;
+
+				switch (delim)
+				{
+					case '[': close = ']'; break;
+					case '{': close = '}'; break;
+					case '(': close = ')'; break;
+					case '<': close = '>'; break;
+					default: close = delim; break;
+				}
+
+				p = q + 3;
+				while (*p != '\0' && !(p[0] == close && p[1] == '\''))
+					++p;
+				if (*p != '\0')
+					p += 2;  /* skip the closing delimiter and quote */
+				continue;
+			}
+		}
+
 		if (*p == '\'')
 		{
 			/* string literal; '' is an escaped single quote */
@@ -2584,20 +2658,36 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 			}
 
 			if (num < base || num >= base + maxnum)
-				oracleError_i(FDW_UNABLE_TO_CREATE_EXECUTION,
-					p_style
-						? "the PL/SQL block uses the bind placeholder :p%d, but not enough bind parameters were supplied"
-						: "the remote query uses the bind placeholder :%d, but not enough bind parameters were supplied",
-					num);
-
-			used[num - base] = 1;
-			++*nocc;
-			if (num > max)
-				max = num;
+			{
+				/*
+				 * Do not report this immediately: the block may also be
+				 * missing :p0, and that is the more useful diagnostic.
+				 */
+				if (overflow < 0)
+					overflow = num;
+			}
+			else
+			{
+				used[num - base] = 1;
+				++*nocc;
+				if (num > max)
+					max = num;
+			}
 		}
 		else
 			++p;
 	}
+
+	/*
+	 * A PL/SQL block executed with oracle_exec must assign its result to
+	 * :p0.  Report that before the generic range and gap checks, so that a
+	 * block like "BEGIN :p1 := ...; END;" gets the useful hint.
+	 */
+	if (p_style && (maxnum <= 0 || !used[0]))
+		oracleError_ih(FDW_UNABLE_TO_CREATE_EXECUTION,
+			"the PL/SQL block does not assign a value to the bind placeholder :p%d",
+			0,
+			"use oracle_execute to execute a block that returns no result");
 
 	/* the placeholder numbers must be gap-free starting with "base" */
 	for (i=base; i<=max; ++i)
@@ -2607,6 +2697,13 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 					? "the bind placeholders in the PL/SQL block are not consecutive; the bind placeholder :p%d is missing"
 					: "the bind placeholders in the remote query are not consecutive; the bind placeholder :%d is missing",
 				i);
+
+	if (overflow >= 0)
+		oracleError_i(FDW_UNABLE_TO_CREATE_EXECUTION,
+			p_style
+				? "the PL/SQL block uses the bind placeholder :p%d, but not enough bind parameters were supplied"
+				: "the remote query uses the bind placeholder :%d, but not enough bind parameters were supplied",
+			overflow);
 
 	oracleFree(used);
 

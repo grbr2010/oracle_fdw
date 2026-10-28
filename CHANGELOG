@@ -11,6 +11,11 @@ Version 2.10.0
   - Fix RAW columns in oracle_query: declaring the result column as bytea
     returned the hex representation as ASCII characters instead of the
     binary data.
+  - Fix a remote cursor leak in oracle_query when preparing the statement
+    fails after the statement handle has been registered.
+  - Recognize Oracle alternative quoting (q'...' and nq'...') when checking
+    bind placeholders, so that placeholders inside such string literals are
+    not bound.
 
   Enhancements:
   - Add a CI workflow that automatically tests new commits against PostgreSQL
@@ -20,9 +25,12 @@ Version 2.10.0
     bind parameters on the Oracle server and return the result to PostgreSQL,
     so that remote functions and package functions can be called from
     PostgreSQL like Oracle database link calls.
-    oracle_query streams the result into a spilling tuplestore, so memory use
-    stays bounded and the fetch can be canceled, and oracle_scalar reads only
-    the first row and the first column of the result.
+    oracle_query materializes the result into a tuplestore that can spill to
+    disk, so memory use stays bounded and the fetch can be canceled; because
+    PostgreSQL materializes the whole result before applying LIMIT, put a row
+    limit into the remote statement if you need to reduce remote work.
+    oracle_scalar reads only the first row and the first column of the
+    result.
   - Add the functions oracle_call and oracle_exec that call remote functions
     that modify data and remote procedures with OUT parameters through an
     anonymous PL/SQL block, which a query cannot do.
@@ -34,7 +42,10 @@ Version 2.10.0
     are described.
   - Verify that the bind placeholders :1, :2, ... in a dynamic statement are
     positional, consecutive and match the number of parameters, reporting a
-    useful error instead of ORA-01008 or ORA-01036.
+    useful error instead of ORA-01008 or ORA-01036.  The PL/SQL path uses the
+    same check, recognizes q-quoted strings, requires the result bind :p0 in
+    oracle_exec and cross-checks the number of bind variables reported by
+    Oracle.
   - Report a truncated remote value (a negative result indicator below -1)
     instead of silently returning incomplete data.
   - Add a HINT that points to oracle_call when a query calls a remote
