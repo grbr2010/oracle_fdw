@@ -1406,6 +1406,9 @@ https://github.com/laurenz/oracle_fdw/issues/160.
 
 Загляните в [Wiki](https://github.com/laurenz/oracle_fdw/wiki) за помощью
 по настройке на определённых платформах и по другим проблемам.
+Разобранные примеры динамических функций, включая присваивание результатов
+переменным PL/pgSQL и воспроизводимую настройку тестового окружения, см. в
+[doc/usage-examples.ru.md](doc/usage-examples.ru.md).
 Также может помочь поиск в
 [GitHub issues](https://github.com/laurenz/oracle_fdw/issues) — возможно,
 вы не первый, кто столкнулся с этой проблемой.
