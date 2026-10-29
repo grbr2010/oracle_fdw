@@ -38,6 +38,7 @@ struct connEntry
 	struct stmtHandleEntry *stmtlist;
 	int xact_level;  /* 0 = none, 1 = main, else subtransaction */
 	int readonly;    /* is the current remote transaction read-only? */
+	int dml_in_transaction;  /* has the current remote transaction modified data? */
 	struct connEntry *next;
 };
 
@@ -254,6 +255,8 @@ typedef enum
 extern oracleSession *oracleGetSession(const char *connectstring, oraIsoLevel isolation_level, char *user, char *password, const char *nls_lang, const char *timezone, int have_nchar, const char *tablename, int curlevel);
 extern void oracleCloseStatement(oracleSession *session);
 extern void oracleCloseConnections(void);
+extern void oracleSetDmlInTransaction(oracleSession *session);
+extern int oracleDmlInTransaction(void);
 extern void oracleShutdown(void);
 extern void oracleCancel(void);
 extern void oracleEndTransaction(void *arg, int is_commit, int silent);

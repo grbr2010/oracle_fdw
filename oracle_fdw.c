@@ -168,11 +168,6 @@ PG_MODULE_MAGIC;
 #endif
 
 /*
- * "true" if Oracle data have been modified in the current transaction.
- */
-static bool dml_in_transaction = false;
-
-/*
  * PostGIS geometry type, set in initializePostGIS().
  */
 static Oid GEOMETRYOID = InvalidOid;
@@ -662,7 +657,7 @@ oracle_fdw_validator(PG_FUNCTION_ARGS)
 PGDLLEXPORT Datum
 oracle_close_connections(PG_FUNCTION_ARGS)
 {
-	if (dml_in_transaction)
+	if (oracleDmlInTransaction())
 		ereport(ERROR,
 				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
 				errmsg("connections with an active transaction cannot be closed"),
@@ -760,7 +755,7 @@ oracle_execute(PG_FUNCTION_ARGS)
 	PG_TRY();
 	{
 		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
-			dml_in_transaction = true;
+			oracleSetDmlInTransaction(session);
 
 		oracleExecuteCall(session, stmt);
 	}
@@ -1252,7 +1247,7 @@ oracle_call(PG_FUNCTION_ARGS)
 	PG_TRY();
 	{
 		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
-			dml_in_transaction = true;
+			oracleSetDmlInTransaction(session);
 
 		oraclePrepareBlock(session, buf.data, nargs, args, nargs + 1, call);
 		result = oracleExecuteBlock(session, call);
@@ -1329,7 +1324,7 @@ oracle_exec(PG_FUNCTION_ARGS)
 	PG_TRY();
 	{
 		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
-			dml_in_transaction = true;
+			oracleSetDmlInTransaction(session);
 
 		oraclePrepareBlock(session, block, nargs, args, nargs + 1, call);
 		result = oracleExecuteBlock(session, call);
@@ -2668,7 +2663,7 @@ oracleExecForeignInsert(EState *estate, ResultRelInfo *rinfo, TupleTableSlot *sl
 
 	elog(DEBUG3, "oracle_fdw: execute foreign table insert on %d", RelationGetRelid(rinfo->ri_RelationDesc));
 
-	dml_in_transaction = true;
+	oracleSetDmlInTransaction(fdw_state->session);
 
 	MemoryContextReset(fdw_state->temp_cxt);
 	oldcontext = MemoryContextSwitchTo(fdw_state->temp_cxt);
@@ -2717,7 +2712,7 @@ oracleExecForeignUpdate(EState *estate, ResultRelInfo *rinfo, TupleTableSlot *sl
 
 	elog(DEBUG3, "oracle_fdw: execute foreign table update on %d", RelationGetRelid(rinfo->ri_RelationDesc));
 
-	dml_in_transaction = true;
+	oracleSetDmlInTransaction(fdw_state->session);
 
 	MemoryContextReset(fdw_state->temp_cxt);
 	oldcontext = MemoryContextSwitchTo(fdw_state->temp_cxt);
@@ -2767,7 +2762,7 @@ oracleExecForeignDelete(EState *estate, ResultRelInfo *rinfo, TupleTableSlot *sl
 
 	elog(DEBUG3, "oracle_fdw: execute foreign table delete on %d", RelationGetRelid(rinfo->ri_RelationDesc));
 
-	dml_in_transaction = true;
+	oracleSetDmlInTransaction(fdw_state->session);
 
 	MemoryContextReset(fdw_state->temp_cxt);
 	oldcontext = MemoryContextSwitchTo(fdw_state->temp_cxt);
@@ -7113,8 +7108,6 @@ transactionCallback(XactEvent event, void *arg)
 			oracleEndTransaction(arg, 0, 1);
 			break;
 	}
-
-	dml_in_transaction = false;
 }
 
 /*
