@@ -35,6 +35,19 @@
 /* number of bytes to read per LOB chunk */
 #define LOB_CHUNK_SIZE 65536
 
+/*
+ * Maximum size of the buffer for a single value of a dynamic query.
+ * OCI returns the length of the value in a ub2 variable, so the buffer
+ * cannot hold more bytes than this.
+ */
+#define ORACLE_DYN_MAX_VALUE 65535
+
+/*
+ * Maximum total size of the result buffers of a dynamic query.
+ * The prefetch size is reduced if the buffers would exceed this limit.
+ */
+#define ORACLE_DYN_MAX_BUFFER (4 * 1024 * 1024)
+
 /* emit no error messages when set, used for shutdown */
 static int silent = 0;
 
@@ -2870,6 +2883,10 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 	sb2 *param_ind = NULL;  /* NULL indicators for the bind parameters */
 	char *param_name = NULL;  /* the bind parameter names ":1", ":2", ... */
 	struct dynState *state;
+	ub1 *csfrms = NULL;  /* the character set form of each column */
+	char msgbuf[512];
+	int64_t row_bytes = 0;
+	const ub1 nchar = SQLCS_NCHAR;
 
 	/* make sure there is no statement handle stored in "session" */
 	if (session->stmthp != NULL)
@@ -3020,7 +3037,6 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 	state = oracleAlloc(sizeof(struct dynState));
 	state->ncols = (int)ncols;
 	state->ndef = (define_cols <= 0 || define_cols >= (int)ncols) ? (int)ncols : define_cols;
-	state->prefetch = (int)prefetch;
 	state->colname = oracleAlloc(state->ndef * sizeof(char *));
 	state->coltype = oracleAlloc(state->ndef * sizeof(int));
 
@@ -3030,7 +3046,13 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 	state->buf_size = oracleAlloc(state->ndef * sizeof(sb4));
 	state->param_ind = param_ind;
 
-	/* loop through the select list, define the first "ndef" result values as strings */
+	csfrms = oracleAlloc(state->ndef * sizeof(ub1));
+
+	/*
+	 * Loop through the select list and determine the size of the result
+	 * buffer for each column.  The buffers are allocated after the sizes of
+	 * all columns are known, because the prefetch size depends on their sum.
+	 */
 	for (i=1; i<=state->ndef; ++i)
 	{
 		ub2 ora_type, bin_size = 0;
@@ -3039,7 +3061,6 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 		sb1 scale = 0;
 		ub4 charsize = 0, ident_size;
 		OraText *ident;
-		const ub1 nchar = SQLCS_NCHAR;
 
 		/* get the parameter descriptor for the column */
 		if (checkerr(
@@ -3178,7 +3199,46 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 					"use CAST or TO_CHAR to convert the column to a supported type (VARCHAR2, NUMBER, DATE, TIMESTAMP, ...)");
 		}
 
-		/* allocate the result buffers for "prefetch" rows */
+		csfrms[i-1] = csfrm;
+	}
+
+	/*
+	 * The length of a value is returned by OCI in a ub2 variable, so the
+	 * buffer for a single value cannot hold more bytes than this.
+	 */
+	for (i=0; i<state->ndef; ++i)
+	{
+		if (state->buf_size[i] > ORACLE_DYN_MAX_VALUE)
+		{
+			snprintf(msgbuf, sizeof(msgbuf),
+				"column %s in the remote query is too wide for the dynamic query interface (%d bytes)",
+				state->colname[i], (int)state->buf_size[i]);
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION, msgbuf,
+				"use CAST or TO_CHAR to convert the column to a shorter representation");
+		}
+
+		row_bytes += state->buf_size[i];
+	}
+
+	/*
+	 * Limit the total size of the result buffers: the prefetch size is
+	 * reduced until the buffers fit into the budget.
+	 */
+	if (row_bytes > 0)
+	{
+		unsigned int max_prefetch = (unsigned int)(ORACLE_DYN_MAX_BUFFER / row_bytes);
+
+		if (max_prefetch < 1)
+			max_prefetch = 1;
+		if (prefetch > max_prefetch)
+			prefetch = max_prefetch;
+	}
+
+	state->prefetch = (int)prefetch;
+
+	/* allocate the result buffers for "prefetch" rows and define the result values */
+	for (i=1; i<=state->ndef; ++i)
+	{
 		state->buf[i-1] = oracleAlloc((size_t)prefetch * state->buf_size[i-1]);
 		state->ind[i-1] = oracleAlloc(prefetch * sizeof(sb2));
 		state->len[i-1] = oracleAlloc(prefetch * sizeof(ub2));
@@ -3200,7 +3260,7 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 		 * Use the more expensive character set conversion only if requested
 		 * and only for columns with a national character set.
 		 */
-		if (session->have_nchar && csfrm == SQLCS_NCHAR
+		if (session->have_nchar && csfrms[i-1] == SQLCS_NCHAR
 			&& checkerr(
 				OCIAttrSet((void *)defnhp, OCI_HTYPE_DEFINE, (void *)&nchar, 0,
 					OCI_ATTR_CHARSET_FORM, session->envp->errhp),
@@ -3211,6 +3271,8 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 				oraMessage);
 		}
 	}
+
+	oracleFree(csfrms);
 
 	return state;
 }
