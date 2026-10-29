@@ -101,6 +101,23 @@ struct dynState
 
 typedef struct dynState dynState;
 
+/*
+ * Buffers of an anonymous PL/SQL block.  OCI keeps the addresses of the
+ * indicator and of the length of the output bind variable until the
+ * statement is released, so they must not live on the stack of the calling
+ * function: an error would unwind the frame and leave OCI writing to dead
+ * memory.
+ */
+struct oraBlock
+{
+	char *outbuf;      /* buffer for the value of the output bind variable */
+	ora_sb2 *out_ind;  /* NULL indicator of the output bind variable */
+	ora_ub2 *out_len;  /* length of the value of the output bind variable */
+	ora_sb2 *in_ind;   /* NULL indicators of the input bind variables */
+};
+
+typedef struct oraBlock oraBlock;
+
 /* types for the Oracle table description */
 typedef enum
 {
@@ -248,7 +265,9 @@ extern void oraclePrepareQuery(oracleSession *session, const char *query, const 
 extern unsigned int oracleExecuteQuery(oracleSession *session, const struct oraTable *oraTable, struct paramDesc *paramList, unsigned int prefetch);
 extern unsigned int oracleFetchNext(oracleSession *session, unsigned int prefetch);
 extern void oracleExecuteCall(oracleSession *session, char * const stmt);
-extern char *oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args, int nbinds);
+extern void oraclePrepareBlock(oracleSession *session, const char *block, int nargs, char * const *args, int nbinds, oraBlock *call);
+extern char *oracleExecuteBlock(oracleSession *session, oraBlock *call);
+extern void oracleFreeBlock(oracleSession *session, oraBlock *call);
 extern struct dynState *oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, char * const *params, unsigned int prefetch, int define_cols);
 extern void oracleStartDynamic(oracleSession *session, struct dynState *state);
 extern int oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values);

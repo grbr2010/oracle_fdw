@@ -1152,6 +1152,7 @@ oracle_call(PG_FUNCTION_ARGS)
 	int major, minor, update, patch, port_patch;
 	int maxlen, segments, i, max_seg_len;
 	const char *p;
+	oraBlock * volatile call;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
 		ereport(ERROR,
@@ -1224,21 +1225,34 @@ oracle_call(PG_FUNCTION_ARGS)
 		appendStringInfo(&buf, "%s:p%d", i ? ", " : "", i + 1);
 	appendStringInfoString(&buf, "); END;");
 
+	/* the buffers of the call are allocated by oraclePrepareBlock */
+	call = palloc(sizeof(oraBlock));
+	memset(call, 0, sizeof(oraBlock));
+
 	PG_TRY();
 	{
 		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
 			dml_in_transaction = true;
 
-		result = oracleCallFunction(session, buf.data, nargs, args, nargs + 1);
+		oraclePrepareBlock(session, buf.data, nargs, args, nargs + 1, call);
+		result = oracleExecuteBlock(session, call);
 	}
 	PG_CATCH();
 	{
-		/* the error may have left the statement open on the cached session */
-		oracleCloseStatement(session);
+		/*
+		 * The statement may still be open on the cached session: close it
+		 * before the buffers are freed, otherwise the remote cursor stays
+		 * open until the end of the transaction.
+		 */
+		oracleFreeBlock(session, call);
+		pfree(call);
 		pfree(session);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	oracleFreeBlock(session, call);
+	pfree(call);
 
 	/* free the session (connection will be cached) */
 	pfree(session);
@@ -1267,6 +1281,7 @@ oracle_exec(PG_FUNCTION_ARGS)
 	oracleSession *session;
 	char *result;
 	int maxpl, nocc;
+	oraBlock * volatile call;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
 		ereport(ERROR,
@@ -1287,21 +1302,34 @@ oracle_exec(PG_FUNCTION_ARGS)
 
 	session = oracleConnectServer(srvname);
 
+	/* the buffers of the call are allocated by oraclePrepareBlock */
+	call = palloc(sizeof(oraBlock));
+	memset(call, 0, sizeof(oraBlock));
+
 	PG_TRY();
 	{
 		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
 			dml_in_transaction = true;
 
-		result = oracleCallFunction(session, block, nargs, args, nargs + 1);
+		oraclePrepareBlock(session, block, nargs, args, nargs + 1, call);
+		result = oracleExecuteBlock(session, call);
 	}
 	PG_CATCH();
 	{
-		/* the error may have left the statement open on the cached session */
-		oracleCloseStatement(session);
+		/*
+		 * The statement may still be open on the cached session: close it
+		 * before the buffers are freed, otherwise the remote cursor stays
+		 * open until the end of the transaction.
+		 */
+		oracleFreeBlock(session, call);
+		pfree(call);
 		pfree(session);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
+
+	oracleFreeBlock(session, call);
+	pfree(call);
 
 	/* free the session (connection will be cached) */
 	pfree(session);

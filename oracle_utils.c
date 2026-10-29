@@ -2405,33 +2405,38 @@ oracleCountUniqueBinds(oracleSession *session, ub4 *nuniq)
 }
 
 /*
- * oracleCallFunction
- * 		Execute an anonymous PL/SQL block that has one output bind ":p0"
+ * oraclePrepareBlock
+ * 		Prepare an anonymous PL/SQL block that has one output bind ":p0"
  * 		(a string of up to 32767 bytes) and "nargs" input binds ":p1" to
- * 		":pN" (NULL array elements are SQL NULL).
+ * 		":pN" (NULL array elements are SQL NULL) and bind them.
  * 		The caller has to validate the bind placeholders in the block with
  * 		oracleCheckPlaceholders and pass the number of distinct bind
  * 		variables as "nbinds" (normally nargs + 1); that number is
  * 		cross-checked against the bind count reported by Oracle.
- * 		Returns the value of ":p0" (allocated with oracleAlloc in the
- * 		current memory context; NULL for SQL NULL), the statement is closed
- * 		before returning.
+ * 		The buffers are allocated with oracleAlloc and stored in "call";
+ * 		they must be released with oracleFreeBlock, and the statement must
+ * 		be closed before they are freed, because OCI still refers to them.
  */
-char *
-oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args, int nbinds)
+void
+oraclePrepareBlock(oracleSession *session, const char *block, int nargs, char * const *args, int nbinds, oraBlock *call)
 {
 	OCIBind *bndhp = NULL;
-	sb2 out_ind = -1;
-	ub2 out_len = 0;
 	ub4 bind_count;
-	sb2 *in_ind = NULL;
-	char *outbuf;
-	char *result;
 	int i;
 
 	/* make sure there is no statement handle stored in "session" */
 	if (session->stmthp != NULL)
-		oracleError(FDW_ERROR, "oracleCallFunction internal error: statement handle is not NULL");
+		oracleError(FDW_ERROR, "oraclePrepareBlock internal error: statement handle is not NULL");
+
+	/*
+	 * The indicator and the length of the output bind variable must not live
+	 * on the stack: OCI keeps their addresses until the statement is released,
+	 * and an error would unwind the frame.
+	 */
+	call->out_ind = (ora_sb2 *) oracleAlloc(sizeof(ora_sb2));
+	call->out_len = (ora_ub2 *) oracleAlloc(sizeof(ora_ub2));
+	*call->out_ind = -1;
+	*call->out_len = 0;
 
 	/* prepare the block */
 	if (checkerr(
@@ -2464,13 +2469,13 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 	}
 
 	/* bind the output parameter :p0 (PL/SQL VARCHAR2 can hold 32767 bytes) */
-	outbuf = oracleAlloc(32768);
-	outbuf[0] = '\0';
+	call->outbuf = oracleAlloc(32768);
+	call->outbuf[0] = '\0';
 	if (checkerr(
 		OCIBindByName(session->stmthp, &bndhp, session->envp->errhp,
 			(text *)":p0", (sb4)3,
-			outbuf, 32768, SQLT_STR,
-			(dvoid *)&out_ind, &out_len, NULL, (ub4)0, NULL, OCI_DEFAULT),
+			call->outbuf, 32768, SQLT_STR,
+			(dvoid *)call->out_ind, call->out_len, NULL, (ub4)0, NULL, OCI_DEFAULT),
 		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
 	{
 		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2480,21 +2485,21 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 
 	/* bind the input parameters :p1 ... :pN */
 	if (nargs > 0)
-		in_ind = oracleAlloc(nargs * sizeof(sb2));
+		call->in_ind = (ora_sb2 *) oracleAlloc(nargs * sizeof(ora_sb2));
 
 	for (i=0; i<nargs; ++i)
 	{
 		char name[12];
 		sb4 value_len = (args[i] == NULL) ? 0 : (sb4)strlen(args[i]) + 1;
 
-		in_ind[i] = (args[i] == NULL) ? -1 : 0;
+		call->in_ind[i] = (args[i] == NULL) ? -1 : 0;
 		snprintf(name, sizeof(name), ":p%d", i + 1);
 
 		if (checkerr(
 			OCIBindByName(session->stmthp, &bndhp, session->envp->errhp,
 				(text *)name, (sb4)strlen(name),
 				args[i], value_len, SQLT_STR,
-				(dvoid *)&in_ind[i], NULL, NULL, (ub4)0, NULL, OCI_DEFAULT),
+				(dvoid *)&call->in_ind[i], NULL, NULL, (ub4)0, NULL, OCI_DEFAULT),
 			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
 		{
 			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2502,6 +2507,20 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 				oraMessage);
 		}
 	}
+}
+
+/*
+ * oracleExecuteBlock
+ * 		Execute the block prepared by oraclePrepareBlock and return the value
+ * 		of the output bind variable ":p0" (allocated with oracleAlloc in the
+ * 		current memory context; NULL for SQL NULL).
+ * 		The statement is not closed here: the caller has to call
+ * 		oracleFreeBlock to release the statement and the buffers.
+ */
+char *
+oracleExecuteBlock(oracleSession *session, oraBlock *call)
+{
+	char *result;
 
 	/* execute the block */
 	if (checkerr(
@@ -2511,7 +2530,7 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 	{
 		if (err_code == 6502)
 			oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
-				"the result of the PL/SQL block is too large for the remote server",
+				"the result of the PL/SQL block is too large for the remote server: %s",
 				oraMessage,
 				"Return at most 32767 bytes or use oracle_scalar or oracle_query for CLOB results.");
 
@@ -2521,30 +2540,56 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 	}
 
 	/* get the result from :p0 */
-	if (out_ind == -1)
+	if (*call->out_ind == -1)
 	{
 		result = NULL;
 	}
 	else
 	{
-		if (out_ind != 0)
+		if (*call->out_ind != 0)
 			oracleError(FDW_UNABLE_TO_CREATE_EXECUTION,
 				"the result of the PL/SQL block was truncated on the remote server");
 
-		result = oracleAlloc((size_t)out_len + 1);
-		oracleVerifyEncoding(outbuf, (int)out_len);
-		memcpy(result, outbuf, out_len);
-		result[out_len] = '\0';
+		result = oracleAlloc((size_t)*call->out_len + 1);
+		oracleVerifyEncoding(call->outbuf, (int)*call->out_len);
+		memcpy(result, call->outbuf, *call->out_len);
+		result[*call->out_len] = '\0';
 	}
 
-	/* close the statement (the connection will be cached) */
+	return result;
+}
+
+/*
+ * oracleFreeBlock
+ * 		Close the statement of a PL/SQL call and free its buffers.
+ * 		The statement must be closed before the buffers are freed: OCI still
+ * 		refers to them until the statement handle is released.
+ */
+void
+oracleFreeBlock(oracleSession *session, oraBlock *call)
+{
 	oracleCloseStatement(session);
 
-	oracleFree(outbuf);
-	if (in_ind != NULL)
-		oracleFree(in_ind);
-
-	return result;
+	if (call->outbuf != NULL)
+	{
+		oracleFree(call->outbuf);
+		call->outbuf = NULL;
+	}
+	if (call->out_ind != NULL)
+	{
+		oracleFree(call->out_ind);
+		call->out_ind = NULL;
+	}
+	if (call->out_len != NULL)
+	{
+		oracleFree(call->out_len);
+		call->out_len = NULL;
+	}
+	if (call->in_ind != NULL)
+	{
+		oracleFree(call->in_ind);
+		call->in_ind = NULL;
+	}
 }
 
 /*
