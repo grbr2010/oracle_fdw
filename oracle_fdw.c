@@ -705,23 +705,26 @@ oracle_diag(PG_FUNCTION_ARGS)
 
 	if (PG_ARGISNULL(0))
 	{
-		/* display some important Oracle environment variables */
-		static const char * const oracle_env[] = {
-			"ORACLE_HOME",
-			"ORACLE_SID",
-			"TNS_ADMIN",
-			"TWO_TASK",
-			"LDAP_ADMIN",
-			NULL
-		};
-		int i;
-
-		for (i=0; oracle_env[i] != NULL; ++i)
+		/* display some important Oracle environment variables to superusers only */
+		if (superuser())
 		{
-			char *val = getenv(oracle_env[i]);
+			static const char * const oracle_env[] = {
+				"ORACLE_HOME",
+				"ORACLE_SID",
+				"TNS_ADMIN",
+				"TWO_TASK",
+				"LDAP_ADMIN",
+				NULL
+			};
+			int i;
 
-			if (val != NULL)
-				appendStringInfo(&version, ", %s=%s", oracle_env[i], val);
+			for (i=0; oracle_env[i] != NULL; ++i)
+			{
+				char *val = getenv(oracle_env[i]);
+
+				if (val != NULL)
+					appendStringInfo(&version, ", %s=%s", oracle_env[i], val);
+			}
 		}
 	}
 	else
@@ -753,6 +756,9 @@ oracle_execute(PG_FUNCTION_ARGS)
 	Name srvname = PG_GETARG_NAME(0);
 	char *stmt = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	oracleSession *session = oracleConnectServer(srvname);
+
+	if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
+		dml_in_transaction = true;
 
 	oracleExecuteCall(session, stmt);
 
@@ -798,6 +804,17 @@ parseParamArray(FunctionCallInfo fcinfo, int argno, int *nparams)
 
 	*nparams = n;
 	return params;
+}
+
+/*
+ * oracleVerifyEncoding
+ * 		Check that the string returned by Oracle is a valid byte sequence
+ * 		for the database encoding and does not contain an embedded NUL byte.
+ */
+void
+oracleVerifyEncoding(const char *value, int len)
+{
+	(void)pg_verify_mbstr(GetDatabaseEncoding(), value, len, false);
 }
 
 /*
@@ -925,6 +942,11 @@ oracle_query(PG_FUNCTION_ARGS)
 				oracleCloseDynamic(qstate->session, qstate->state);
 			else
 				oracleCloseStatement(qstate->session);
+			if (qstate->session != NULL)
+			{
+				pfree(qstate->session);
+				qstate->session = NULL;
+			}
 			qstate->done = 1;
 			PG_RE_THROW();
 		}
@@ -960,6 +982,11 @@ oracle_query(PG_FUNCTION_ARGS)
 		PG_CATCH();
 		{
 			oracleCloseDynamic(qstate->session, qstate->state);
+			if (qstate->session != NULL)
+			{
+				pfree(qstate->session);
+				qstate->session = NULL;
+			}
 			qstate->done = 1;
 			PG_RE_THROW();
 		}
@@ -977,6 +1004,32 @@ oracle_query(PG_FUNCTION_ARGS)
 					&& TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid == BYTEAOID)
 					values[c] = psprintf("\\x%s", values[c]);
 
+			/*
+			 * Oracle represents negative INTERVAL DAY TO SECOND with the sign
+			 * on the day part and the time part already negated, while
+			 * PostgreSQL expects both parts to carry the sign.  Rewrite the
+			 * string accordingly.
+			 */
+			for (c=0; c<qstate->state->ndef; ++c)
+			{
+				if (values[c] != NULL && oracleColIsIntervalDS(qstate->state, c) && values[c][0] == '-')
+				{
+					char *pos = strchr(values[c], ' ');
+					if (pos != NULL)
+						values[c] = psprintf("%.*s-%s",
+											 (int)(pos - values[c] + 1),
+											 values[c],
+											 pos + 1);
+				}
+				else if (values[c] != NULL && oracleColIsNumberOrFloat(qstate->state, c)
+					 && (values[c][0] == '~' || (values[c][0] == '-' && values[c][1] == '~')))
+				{
+					Oid typid = TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid;
+					values[c] = pstrdup(typid == NUMERICOID ? "Nan"
+											  : (values[c][0] == '-' ? "-inf" : "inf"));
+				}
+			}
+
 			/* the strings are interpreted by the type input functions */
 			tuple = BuildTupleFromCStrings(qstate->attinmeta, values);
 
@@ -986,6 +1039,11 @@ oracle_query(PG_FUNCTION_ARGS)
 		{
 			/* the result is exhausted; close the query */
 			oracleCloseDynamic(qstate->session, qstate->state);
+			if (qstate->session != NULL)
+			{
+				pfree(qstate->session);
+				qstate->session = NULL;
+			}
 			qstate->done = 1;
 
 			SRF_RETURN_DONE(funcctx);
@@ -1077,7 +1135,7 @@ oracle_call(PG_FUNCTION_ARGS)
 	StringInfoData buf;
 	char *result;
 	int major, minor, update, patch, port_patch;
-	int maxlen, segments, i;
+	int maxlen, segments, i, max_seg_len;
 	const char *p;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
@@ -1089,17 +1147,10 @@ oracle_call(PG_FUNCTION_ARGS)
 	func = text_to_cstring(PG_GETARG_TEXT_PP(1));
 	args = parseParamArray(fcinfo, 2, &nargs);
 
-	session = oracleConnectServer(srvname);
-
-	/* get the remote server version for the identifier length limit */
-	oracleServerVersion(session, &major, &minor, &update, &patch, &port_patch);
-
-	/* Oracle limits identifier names to 30 bytes before 12.2, then 128 */
-	maxlen = (major > 12 || (major == 12 && minor >= 2)) ? 128 : 30;
-
 	/* the function name must consist of one to three identifier segments */
 	p = func;
 	segments = 0;
+	max_seg_len = 0;
 	while (*p != '\0')
 	{
 		int len = 0;
@@ -1124,11 +1175,9 @@ oracle_call(PG_FUNCTION_ARGS)
 				|| (*p >= '0' && *p <= '9') || *p == '_' || *p == '$' || *p == '#'))
 			++len;
 
-		if (++len > maxlen)
-			ereport(ERROR,
-					(errcode(ERRCODE_INVALID_NAME),
-					errmsg("invalid function name \"%s\": name segments must not be longer than %d bytes", func, maxlen),
-					errhint("use oracle_exec to call functions with long names")));
+		++len;
+		if (len > max_seg_len)
+			max_seg_len = len;
 
 		++segments;
 	}
@@ -1139,6 +1188,20 @@ oracle_call(PG_FUNCTION_ARGS)
 				errmsg("invalid function name \"%s\": expected 1 to 3 name segments", func),
 				errhint("use oracle_exec to call functions that need a more complex name")));
 
+	session = oracleConnectServer(srvname);
+
+	/* get the remote server version for the identifier length limit */
+	oracleServerVersion(session, &major, &minor, &update, &patch, &port_patch);
+
+	/* Oracle limits identifier names to 30 bytes before 12.2, then 128 */
+	maxlen = (major > 12 || (major == 12 && minor >= 2)) ? 128 : 30;
+
+	if (max_seg_len > maxlen)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_NAME),
+				errmsg("invalid function name \"%s\": name segments must not be longer than %d bytes", func, maxlen),
+				errhint("use oracle_exec to call functions with long names")));
+
 	/* construct the PL/SQL block */
 	initStringInfo(&buf);
 	appendStringInfo(&buf, "BEGIN :p0 := %s(", func);
@@ -1148,6 +1211,9 @@ oracle_call(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
+		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
+			dml_in_transaction = true;
+
 		result = oracleCallFunction(session, buf.data, nargs, args, nargs + 1);
 	}
 	PG_CATCH();
@@ -1208,6 +1274,9 @@ oracle_exec(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
+		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
+			dml_in_transaction = true;
+
 		result = oracleCallFunction(session, block, nargs, args, nargs + 1);
 	}
 	PG_CATCH();
@@ -2311,7 +2380,9 @@ oracleBeginForeignModify(ModifyTableState *mtstate, ResultRelInfo *rinfo, List *
 	/* connect to Oracle database */
 	fdw_state->session = oracleGetSession(
 			fdw_state->dbserver,
-			fdw_state->isolation_level,
+			((strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") == 0)
+				? ORA_TRANS_READ_ONLY
+				: fdw_state->isolation_level),
 			fdw_state->user,
 			fdw_state->password,
 			fdw_state->nls_lang,
@@ -2437,7 +2508,9 @@ void oracleBeginForeignInsert(ModifyTableState *mtstate, ResultRelInfo *rinfo)
 
 	fdw_state->session = oracleGetSession(
 			fdw_state->dbserver,
-			fdw_state->isolation_level,
+			((strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") == 0)
+				? ORA_TRANS_READ_ONLY
+				: fdw_state->isolation_level),
 			fdw_state->user,
 			fdw_state->password,
 			fdw_state->nls_lang,
@@ -5973,7 +6046,9 @@ oracleConnectServer(Name srvname)
 	 */
 	return oracleGetSession(
 		dbserver,
-		isolation_level,
+		(strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") == 0)
+			? ORA_TRANS_READ_ONLY
+			: isolation_level,
 		user,
 		password,
 		nls_lang,
@@ -7712,6 +7787,9 @@ oracleError_d(oraError sqlstate, const char *message, const char *detail)
 void
 oracleError_sd(oraError sqlstate, const char *message, const char *arg, const char *detail)
 {
+	/* if the backend was terminated, report that rather than the Oracle error */
+	CHECK_FOR_INTERRUPTS();
+
 	ereport(ERROR,
 			(errcode(to_sqlstate(sqlstate)),
 			errmsg(message, arg),
@@ -7725,6 +7803,9 @@ oracleError_sd(oraError sqlstate, const char *message, const char *arg, const ch
 void
 oracleError_ssdh(oraError sqlstate, const char *message, const char *arg1, const char* arg2, const char *detail, const char *hint)
 {
+	/* if the backend was terminated, report that rather than the Oracle error */
+	CHECK_FOR_INTERRUPTS();
+
 	ereport(ERROR,
 			(errcode(to_sqlstate(sqlstate)),
 			errmsg(message, arg1, arg2),

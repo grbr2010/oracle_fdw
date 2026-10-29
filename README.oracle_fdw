@@ -208,8 +208,16 @@ user's mapping.  Grant `EXECUTE` on them to the roles that need it:
     GRANT EXECUTE ON FUNCTION oracle_call(name, text, text[]) TO migrator;
     GRANT EXECUTE ON FUNCTION oracle_exec(name, text, text[]) TO migrator;
 
-`oracle_execute` keeps its default `PUBLIC` privilege for backward
-compatibility with existing installations.
+`oracle_execute`, `oracle_query`, `oracle_scalar`, `oracle_call` and
+`oracle_exec` are revoked from `PUBLIC` when the extension is created or
+upgraded to 1.3, because they can execute arbitrary SQL on the Oracle server
+with the credentials of the calling user's mapping.  Grant `EXECUTE` on them
+to the roles that need it.
+
+`oracle_diag()` with no argument shows the Oracle client, PostgreSQL and
+oracle_fdw versions to every caller, but the Oracle environment variables
+(`ORACLE_HOME`, `ORACLE_SID`, `TNS_ADMIN`, `TWO_TASK` and `LDAP_ADMIN`) are
+only appended for superusers.
 
 **Why there are four functions**
 
