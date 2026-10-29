@@ -901,3 +901,99 @@ END;$$;
 SELECT * FROM oracle_query('oracle', 'SELECT v FROM scott.subx_test') AS q(v text);
 
 SELECT oracle_execute('oracle', 'DROP TABLE scott.subx_test PURGE');
+
+
+/* test the resource handling and the value conversion of the dynamic functions */
+
+-- the tests report their results with NOTICE messages
+SET client_min_messages = NOTICE;
+
+-- create a remote table for the tests; drop a leftover from an aborted previous run
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'DROP TABLE scott.dynfix_test PURGE');
+EXCEPTION
+   WHEN OTHERS THEN
+      NULL;
+END;$$;
+SELECT oracle_execute('oracle', 'CREATE TABLE scott.dynfix_test (v varchar2(10))');
+
+-- a failed statement must not leave the remote cursor open; 350 failed calls in
+-- the same transaction would exhaust the cursor limit of the remote session
+DO
+$$DECLARE
+   i   int;
+BEGIN
+   FOR i IN 1..350 LOOP
+      BEGIN
+         PERFORM oracle_execute('oracle', 'INSERT INTO scott.no_such_table_xyz VALUES (1)');
+      EXCEPTION
+         WHEN OTHERS THEN
+            NULL;
+      END;
+   END LOOP;
+   RAISE NOTICE 'completed 350 failed calls';
+END;$$;
+-- the remote session is still usable after the failed calls
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual');
+
+-- a conversion error closes the remote cursor and leaves the session usable
+SELECT * FROM oracle_query('oracle', 'SELECT ''not a number'' FROM dual') AS q(n int);
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual');
+
+-- an Oracle DATE contains a time that is lost when the value is converted to a
+-- PostgreSQL date; use a timestamp to keep it
+SELECT * FROM oracle_query('oracle', 'SELECT TO_DATE(''2026-01-02 03:04:05'', ''YYYY-MM-DD HH24:MI:SS'') d FROM dual') AS q(d date);
+SELECT * FROM oracle_query('oracle', 'SELECT TO_DATE(''2026-01-02 03:04:05'', ''YYYY-MM-DD HH24:MI:SS'') d FROM dual') AS q(d timestamp);
+
+-- a value with an embedded NUL byte is rejected instead of being truncated
+SELECT oracle_scalar('oracle', 'SELECT ''a'' || CHR(0) || ''b'' FROM dual');
+
+-- a block that does not assign :p0 returns NULL
+SELECT oracle_exec('oracle', 'BEGIN IF 1 = 0 THEN :p0 := ''x''; END IF; END;') IS NULL AS is_null;
+
+-- a remote DML keeps the connection open until the transaction ends
+BEGIN;
+SELECT oracle_execute('oracle', 'INSERT INTO scott.dynfix_test VALUES (''x'')');
+SELECT oracle_close_connections();
+ROLLBACK;
+SELECT oracle_close_connections();
+
+-- a read-only transaction does not modify data and does not keep the connection
+BEGIN READ ONLY;
+DO
+$$BEGIN
+   PERFORM oracle_execute('oracle', 'INSERT INTO scott.dynfix_test VALUES (''x'')');
+   RAISE NOTICE 'the insert succeeded';
+EXCEPTION
+   WHEN OTHERS THEN
+      RAISE NOTICE 'the remote DML was rejected';
+END;$$;
+SELECT oracle_close_connections();
+COMMIT;
+
+-- a function name may consist of one to three segments
+SELECT oracle_execute('oracle', 'CREATE OR REPLACE FUNCTION scott.dynfix_fn(who varchar2) RETURN varchar2 IS BEGIN RETURN ''hi '' || who; END;');
+SELECT oracle_call('oracle', 'dynfix_fn', 'x');
+SELECT oracle_call('oracle', 'scott.dynfix_fn', 'x');
+SELECT oracle_execute('oracle', 'CREATE OR REPLACE PACKAGE scott.dynfix_pkg IS FUNCTION greet(who varchar2) RETURN varchar2; END;');
+SELECT oracle_execute('oracle', 'CREATE OR REPLACE PACKAGE BODY scott.dynfix_pkg IS FUNCTION greet(who varchar2) RETURN varchar2 IS BEGIN RETURN ''hi '' || who; END; END;');
+SELECT oracle_call('oracle', 'scott.dynfix_pkg.greet', 'x');
+SELECT oracle_execute('oracle', 'DROP PACKAGE scott.dynfix_pkg');
+SELECT oracle_execute('oracle', 'DROP FUNCTION scott.dynfix_fn');
+
+-- a name segment must not be longer than the limit of the remote server
+-- (128 bytes for Oracle 12.2 and later)
+SELECT oracle_call('oracle', repeat('a', 129));
+
+-- a name segment must start with a letter or an underscore
+SELECT oracle_call('oracle', '1abc');
+
+-- a column that is wider than 64 KB cannot be returned by the dynamic query
+-- interface; this cannot be tested here, because the maximum size of a
+-- VARCHAR2 column depends on the MAX_STRING_SIZE parameter of the remote
+-- database (4000 bytes in STANDARD mode, 32767 bytes in MAXIMUM mode)
+
+SELECT oracle_execute('oracle', 'DROP TABLE scott.dynfix_test PURGE');
+
+SET client_min_messages = WARNING;
