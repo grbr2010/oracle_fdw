@@ -819,11 +819,17 @@ parseParamArray(FunctionCallInfo fcinfo, int argno, int *nparams)
 /*
  * oracleVerifyEncoding
  * 		Check that the string returned by Oracle is a valid byte sequence
- * 		for the database encoding.
+ * 		for the database encoding and does not contain an embedded NUL byte.
  */
 void
 oracleVerifyEncoding(const char *value, int len)
 {
+	if (len > 0 && memchr(value, '\0', (size_t)len) != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
+				errmsg("the value returned by the remote server contains an embedded NUL byte"),
+				errhint("Use REPLACE or CAST on the remote server to remove the NUL character.")));
+
 	(void)pg_verify_mbstr(GetDatabaseEncoding(), value, len, false);
 }
 
