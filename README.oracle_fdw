@@ -1353,6 +1353,9 @@ for more information.
 
 Check out the [Wiki](https://github.com/laurenz/oracle_fdw/wiki) for
 help with configuration on certain platforms and other problems.
+Worked examples of the dynamic query functions, including assignments to
+PL/pgSQL variables and a reproducible test setup, are in
+[doc/usage-examples.md](doc/usage-examples.md).
 Also, searching the
 [GitHub issues](https://github.com/laurenz/oracle_fdw/issues)
 can help - you may not be the first one with that problem.
