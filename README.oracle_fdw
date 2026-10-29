@@ -16,8 +16,10 @@ conditions and required columns as well as comprehensive EXPLAIN support.
 > remote PL/SQL functions, procedures and anonymous blocks on the Oracle
 > server from PostgreSQL; see sections
 > [Objects created by the extension](#2-objects-created-by-the-extension)
-> and [Usage](#4-usage).  Everything else is the unchanged upstream code;
-> the fork is kept in sync with upstream by merging it.
+> and [Usage](#4-usage).  The rest of the code is based on upstream; besides
+> the four functions, the branch contains fixes for security, transaction
+> handling and data conversion.  The fork is kept in sync with upstream by
+> merging it.
 
 This README contains the following sections:
 
@@ -30,6 +32,7 @@ This README contains the following sections:
 7. [Internals](#7-internals)
 8. [Problems](#8-problems)
 9. [Support](#9-support)
+10. [License](#10-license)
 
 oracle_fdw was written by Laurenz Albe, with notable contributions from
 Vincent Mora of Oslandia and Tatsuro Yamada of the NTT OSS Center.
@@ -1377,3 +1380,16 @@ This requires a GitHub account.
 
 Commercial support is available from
 [CYBERTEC PostgreSQL International GmbH](https://www.cybertec-postgresql.com).
+
+10 License
+==========
+
+oracle_fdw, including this fork, is distributed under a permissive license.
+Permission to use, copy, modify and distribute the software and its
+documentation is granted for any purpose and without fee, provided that the
+copyright notice and the license text are retained.  The software is provided
+"as is", without warranty of any kind.
+
+The full license text and copyright notices are in [LICENSE](LICENSE).
+Upstream copyright is held by CYBERTEC PostgreSQL International GmbH
+(2017–2025) and Magistrat der Stadt Wien (2011–2017).

@@ -504,3 +504,12 @@ client.
 The CI workflow runs the same suite with PostgreSQL 18 against Oracle XE
 21.3 with Instant Client 19.32 and against Oracle Free 23.26 with Instant
 Client 23.26.
+
+---
+
+This document is part of the
+[oracle_fdw fork](https://github.com/grbr2010/oracle_fdw) of
+[laurenz/oracle_fdw](https://github.com/laurenz/oracle_fdw).  The extension
+is distributed under the permissive license in [LICENSE](../LICENSE); upstream
+copyright is held by CYBERTEC PostgreSQL International GmbH and Magistrat der
+Stadt Wien.

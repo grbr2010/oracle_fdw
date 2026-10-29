@@ -507,3 +507,11 @@ PGPORT=5433 make installcheck
 CI workflow запускает тот же набор тестов с PostgreSQL 18 против Oracle XE
 21.3 с Instant Client 19.32 и против Oracle Free 23.26 с Instant Client
 23.26.
+
+---
+
+Этот документ относится к [форку oracle_fdw](https://github.com/grbr2010/oracle_fdw)
+проекта [laurenz/oracle_fdw](https://github.com/laurenz/oracle_fdw).  Расширение
+распространяется по пермиссивной лицензии из [LICENSE](../LICENSE); авторские
+права на оригинал принадлежат CYBERTEC PostgreSQL International GmbH и
+Magistrat der Stadt Wien.
