@@ -201,21 +201,17 @@ These functions can call remote functions that modify data and remote
 procedures with OUT parameters, which a query cannot do; see the sections
 on **oracle_call** and **oracle_exec** below.
 
-`oracle_query`, `oracle_scalar`, `oracle_call` and `oracle_exec` are revoked
-from `PUBLIC` when the extension is created, because they can execute
-arbitrary SQL on the Oracle server with the credentials of the calling
-user's mapping.  Grant `EXECUTE` on them to the roles that need it:
-
-    GRANT EXECUTE ON FUNCTION oracle_query(name, text, text[]) TO migrator;
-    GRANT EXECUTE ON FUNCTION oracle_scalar(name, text, text[]) TO migrator;
-    GRANT EXECUTE ON FUNCTION oracle_call(name, text, text[]) TO migrator;
-    GRANT EXECUTE ON FUNCTION oracle_exec(name, text, text[]) TO migrator;
-
 `oracle_execute`, `oracle_query`, `oracle_scalar`, `oracle_call` and
 `oracle_exec` are revoked from `PUBLIC` when the extension is created or
 upgraded to 1.3, because they can execute arbitrary SQL on the Oracle server
 with the credentials of the calling user's mapping.  Grant `EXECUTE` on them
-to the roles that need it.
+to the roles that need it:
+
+    GRANT EXECUTE ON FUNCTION oracle_execute(name, text) TO migrator;
+    GRANT EXECUTE ON FUNCTION oracle_query(name, text, text[]) TO migrator;
+    GRANT EXECUTE ON FUNCTION oracle_scalar(name, text, text[]) TO migrator;
+    GRANT EXECUTE ON FUNCTION oracle_call(name, text, text[]) TO migrator;
+    GRANT EXECUTE ON FUNCTION oracle_exec(name, text, text[]) TO migrator;
 
 `oracle_diag()` with no argument shows the Oracle client, PostgreSQL and
 oracle_fdw versions to every caller, but the Oracle environment variables
@@ -454,6 +450,32 @@ variables is cross-checked against the count reported by Oracle.
 The result must be at most 32767 bytes long; the same transaction caveats
 as for `oracle_call` apply.
 
+**Value limits and memory use**
+
+The dynamic query interface transfers the result columns as text and converts
+them on the PostgreSQL side.  This has some consequences:
+
+- The result columns are transferred as text, with a buffer of four bytes per
+  character, and Oracle reports the length of a value in a 16-bit variable.
+  A column that is declared with more than 16383 characters is therefore
+  rejected with an error that names the column.  Convert such a column on
+  the Oracle side, for example with `CAST` or `TO_CHAR`.
+
+- The buffers for the result rows are limited to 4 MB per query.  If the
+  columns of the remote query are wide, oracle_fdw reduces the number of rows
+  that it fetches at a time, so that the memory use stays bounded.  A query
+  with narrow columns is not affected.
+
+- An Oracle `DATE` contains a time, but a PostgreSQL `date` does not.  When
+  a remote value is converted to a PostgreSQL `date`, the time is silently
+  discarded.  Declare the result column as `timestamp`, or truncate the value
+  on the Oracle side with `TRUNC`.
+
+- A value that contains an embedded NUL byte cannot be represented in
+  PostgreSQL text.  Such a value is rejected with an error instead of being
+  silently truncated.  Remove the NUL byte on the Oracle side, for example
+  with `REPLACE`.
+
 **Shared caveats**
 
 The same caveats as for `oracle_execute` apply: the functions run with the
@@ -462,8 +484,21 @@ data or have other side effects do not participate in oracle_fdw's two-phase
 transaction management, so an implicit COMMIT inside a called PL/SQL function
 cannot be rolled back with the local transaction.
 
+A DDL statement on the Oracle side issues an implicit COMMIT.  It therefore
+commits the remote transaction, so the remote savepoints no longer exist and
+a rollback to a savepoint that was taken before the DDL cannot undo it.
+
+While a remote transaction has modified Oracle data, the Oracle connections
+cannot be closed: `oracle_close_connections` fails with an error.  This is
+tracked per connection, and the state is cleared when the remote transaction
+of that connection ends.
+
+A `statement_timeout` in PostgreSQL cancels the remote query as well: the
+Oracle session is interrupted and the remote statement is aborted.
+
 See **LIMIT and result materialization** above for the memory use, `LIMIT`
-behavior and cursor lifetime of `oracle_query`.
+behavior and cursor lifetime of `oracle_query`, and **Value limits and memory
+use** above for the limits of the transferred values.
 Also note that calling `oracle_scalar` once per row of a table causes one
 network round trip per call; for bulk processing it is more efficient to run
 a single statement with `oracle_query` that computes all results at once.

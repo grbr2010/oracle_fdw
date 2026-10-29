@@ -137,6 +137,12 @@ Only data types with a sensible string representation are supported in the
 select list.  Cast LOBs, `LONG` and user-defined types explicitly, for
 example with `TO_CHAR` or `CAST`.
 
+A result column must not be declared with more than 16383 characters; a wider
+column is rejected with an error.  An Oracle `DATE` that is converted to a
+PostgreSQL `date` loses its time, so declare the column as `timestamp` if you
+need it.  A value that contains an embedded NUL byte is rejected with an
+error.
+
 ## 4. `oracle_scalar`: a single value
 
 `oracle_scalar` returns the first column of the first result row as `text`.

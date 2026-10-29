@@ -13,6 +13,20 @@ Version 2.10.0
     binary data.
   - Fix a remote cursor leak in oracle_query when preparing the statement
     fails after the statement handle has been registered.
+  - Fix a remote cursor leak in oracle_execute: the statement handle was not
+    stored in the session, so a failed statement stayed open on the Oracle
+    server until the end of the transaction and could exhaust the limit of
+    open cursors.
+  - Fix undefined behaviour in oracle_call and oracle_exec: the indicator
+    and the length of the output bind variable were kept on the stack, which
+    an error unwound while OCI still referred to them.
+  - Fix a remote cursor leak in oracle_query and oracle_scalar: an error
+    while converting a result value left the remote cursor open.
+  - Track the "the transaction has modified Oracle data" flag per connection
+    instead of globally, so that it is cleared when the remote transaction
+    of that connection ends.
+  - Reject a result value that contains an embedded NUL byte instead of
+    silently truncating it at the first NUL.
   - Recognize Oracle alternative quoting (q'...' and nq'...') when checking
     bind placeholders, so that placeholders inside such string literals are
     not bound.
@@ -48,6 +62,10 @@ Version 2.10.0
     Oracle.
   - Report a truncated remote value (a negative result indicator below -1)
     instead of silently returning incomplete data.
+  - Limit the result buffers of a dynamic query to 4 MB by reducing the
+    number of prefetched rows when the result columns are wide, and reject
+    a result column that is declared with more than 16383 characters, whose
+    length Oracle cannot report in a 16-bit variable.
   - Add a HINT that points to oracle_call when a query calls a remote
     function that modifies data (ORA-14551).
   - Require PostgreSQL 15 or better, since PostgreSQL 14 support ended in
