@@ -425,7 +425,7 @@ EXPLAIN (COSTS off) SELECT id FROM typetest1 WHERE vc = ANY (ARRAY['short', (SEL
 --------------------------------------------------------------------------------------------------------------------------------------------------------
  Foreign Scan on typetest1
    Oracle query: SELECT /*e4d3d23eb05ef98f*/ r1."ID", r1."VC" FROM "TYPETEST1" r1 WHERE (r1."VC" IN ('short', :p00001)) ORDER BY r1."ID" ASC NULLS LAST
-   InitPlan expr_1
+   InitPlan 1
      ->  Result
 (4 rows)
 
@@ -1459,8 +1459,8 @@ SELECT oracle_call('nosuchsrv', 'a.b.c.d');
 ERROR:  invalid function name "a.b.c.d": expected 1 to 3 name segments
 HINT:  use oracle_exec to call functions that need a more complex name
 SELECT oracle_call('nosuchsrv', 'scott.f_dml.');
-ERROR:  invalid function name "scott.f_dml.": expected 1 to 3 name segments
-HINT:  use oracle_exec to call functions that need a more complex name
+ERROR:  invalid function name "scott.f_dml.": name segments must be unquoted identifiers
+HINT:  use oracle_exec to call functions with quoted names
 -- PUBLIC has no privileges on the functions that run arbitrary remote SQL
 DROP ROLE IF EXISTS noprivs;
 CREATE ROLE noprivs;
@@ -1471,7 +1471,7 @@ SELECT has_function_privilege('noprivs', 'oracle_execute(name,text)', 'EXECUTE')
        has_function_privilege('noprivs', 'oracle_exec(name,text,text[])', 'EXECUTE') e;
  ex | q | s | c | e 
 ----+---+---+---+---
- f | f | f | f | f
+ f  | f | f | f | f
 (1 row)
 
 SELECT oracle_execute('oracle', 'DROP PROCEDURE scott.p_out');
