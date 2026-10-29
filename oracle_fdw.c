@@ -824,7 +824,7 @@ parseParamArray(FunctionCallInfo fcinfo, int argno, int *nparams)
 /*
  * oracleVerifyEncoding
  * 		Check that the string returned by Oracle is a valid byte sequence
- * 		for the database encoding and does not contain an embedded NUL byte.
+ * 		for the database encoding.
  */
 void
 oracleVerifyEncoding(const char *value, int len)
@@ -954,7 +954,10 @@ oracle_query(PG_FUNCTION_ARGS)
 			 * close the open statement in that case as well.
 			 */
 			if (qstate->state != NULL)
+			{
 				oracleCloseDynamic(qstate->session, qstate->state);
+				qstate->state = NULL;
+			}
 			else
 				oracleCloseStatement(qstate->session);
 			if (qstate->session != NULL)
@@ -981,8 +984,8 @@ oracle_query(PG_FUNCTION_ARGS)
 	else
 	{
 		char **values;
-		HeapTuple tuple;
-		int fetched;
+		HeapTuple volatile tuple = NULL;
+		int volatile fetched;
 		int c;
 
 		/* the row is built in the per-call memory context */
@@ -993,10 +996,59 @@ oracle_query(PG_FUNCTION_ARGS)
 			CHECK_FOR_INTERRUPTS();
 
 			fetched = oracleFetchDynamic(qstate->session, qstate->state, values);
+
+			if (fetched)
+			{
+				/*
+				 * RAW columns are transferred as hex strings; add the "\x"
+				 * prefix that the bytea input function expects.
+				 */
+				for (c=0; c<qstate->state->ndef; ++c)
+					if (values[c] != NULL
+						&& oracleColIsRaw(qstate->state, c)
+						&& TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid == BYTEAOID)
+						values[c] = psprintf("\\x%s", values[c]);
+
+				/*
+				 * Oracle represents negative INTERVAL DAY TO SECOND with the sign
+				 * on the day part and the time part already negated, while
+				 * PostgreSQL expects both parts to carry the sign.  Rewrite the
+				 * string accordingly.
+				 */
+				for (c=0; c<qstate->state->ndef; ++c)
+				{
+					if (values[c] != NULL && oracleColIsIntervalDS(qstate->state, c) && values[c][0] == '-')
+					{
+						char *pos = strchr(values[c], ' ');
+						if (pos != NULL)
+							values[c] = psprintf("%.*s-%s",
+												 (int)(pos - values[c] + 1),
+												 values[c],
+												 pos + 1);
+					}
+					else if (values[c] != NULL && oracleColIsNumberOrFloat(qstate->state, c)
+						 && (values[c][0] == '~' || (values[c][0] == '-' && values[c][1] == '~')))
+					{
+						Oid typid = TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid;
+						values[c] = pstrdup(typid == NUMERICOID ? "Nan"
+												  : (values[c][0] == '-' ? "-inf" : "inf"));
+					}
+				}
+
+				/* the strings are interpreted by the type input functions */
+				tuple = BuildTupleFromCStrings(qstate->attinmeta, values);
+			}
 		}
 		PG_CATCH();
 		{
+			/*
+			 * The conversion of the values may fail (e.g. an invalid input
+			 * for the target type); the remote cursor must be closed in that
+			 * case as well, otherwise it stays open until the end of the
+			 * transaction.
+			 */
 			oracleCloseDynamic(qstate->session, qstate->state);
+			qstate->state = NULL;
 			if (qstate->session != NULL)
 			{
 				pfree(qstate->session);
@@ -1008,48 +1060,7 @@ oracle_query(PG_FUNCTION_ARGS)
 		PG_END_TRY();
 
 		if (fetched)
-		{
-			/*
-			 * RAW columns are transferred as hex strings; add the "\x"
-			 * prefix that the bytea input function expects.
-			 */
-			for (c=0; c<qstate->state->ndef; ++c)
-				if (values[c] != NULL
-					&& oracleColIsRaw(qstate->state, c)
-					&& TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid == BYTEAOID)
-					values[c] = psprintf("\\x%s", values[c]);
-
-			/*
-			 * Oracle represents negative INTERVAL DAY TO SECOND with the sign
-			 * on the day part and the time part already negated, while
-			 * PostgreSQL expects both parts to carry the sign.  Rewrite the
-			 * string accordingly.
-			 */
-			for (c=0; c<qstate->state->ndef; ++c)
-			{
-				if (values[c] != NULL && oracleColIsIntervalDS(qstate->state, c) && values[c][0] == '-')
-				{
-					char *pos = strchr(values[c], ' ');
-					if (pos != NULL)
-						values[c] = psprintf("%.*s-%s",
-											 (int)(pos - values[c] + 1),
-											 values[c],
-											 pos + 1);
-				}
-				else if (values[c] != NULL && oracleColIsNumberOrFloat(qstate->state, c)
-					 && (values[c][0] == '~' || (values[c][0] == '-' && values[c][1] == '~')))
-				{
-					Oid typid = TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid;
-					values[c] = pstrdup(typid == NUMERICOID ? "Nan"
-											  : (values[c][0] == '-' ? "-inf" : "inf"));
-				}
-			}
-
-			/* the strings are interpreted by the type input functions */
-			tuple = BuildTupleFromCStrings(qstate->attinmeta, values);
-
 			SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
-		}
 		else
 		{
 			/* the result is exhausted; close the query */
@@ -1084,9 +1095,9 @@ oracle_scalar(PG_FUNCTION_ARGS)
 	int nparams;
 	char **params;
 	oracleSession *session;
-	struct dynState *state;
-	char *values[1];
-	text *result = NULL;
+	struct dynState * volatile state = NULL;
+	char **values = NULL;
+	text * volatile result = NULL;
 
 	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
 		ereport(ERROR,
@@ -1103,6 +1114,9 @@ oracle_scalar(PG_FUNCTION_ARGS)
 	{
 		/* define only the first column and fetch a single row */
 		state = oraclePrepareDynamic(session, stmt, nparams, params, 1, 1);
+
+		values = (char **) palloc(state->ndef * sizeof(char *));
+
 		oracleStartDynamic(session, state);
 
 		if (oracleFetchDynamic(session, state, values) && values[0] != NULL)
@@ -1112,8 +1126,14 @@ oracle_scalar(PG_FUNCTION_ARGS)
 	}
 	PG_CATCH();
 	{
-		/* the error may have left the statement open on the cached session */
-		oracleCloseStatement(session);
+		/*
+		 * The error may have left the statement open on the cached session:
+		 * close the dynamic query, which closes the statement as well.
+		 */
+		if (state != NULL)
+			oracleCloseDynamic(session, state);
+		else
+			oracleCloseStatement(session);
 		pfree(session);
 		PG_RE_THROW();
 	}

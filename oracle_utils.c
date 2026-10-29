@@ -2938,7 +2938,7 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 			sb4 value_len = (params[i] == NULL) ? 0 : (sb4)strlen(params[i]) + 1;
 
 			param_ind[i] = (params[i] == NULL) ? -1 : 0;
-			sprintf(param_name + (size_t)i * 12, ":%d", i + 1);
+			snprintf(param_name + (size_t)i * 12, 12, ":%d", i + 1);
 
 			if (checkerr(
 				OCIBindByName(session->stmthp, &bndhp, session->envp->errhp,
@@ -3324,6 +3324,10 @@ void
 oracleCloseDynamic(oracleSession *session, struct dynState *state)
 {
 	int i;
+
+	/* nothing to close if the query was never prepared */
+	if (state == NULL)
+		return;
 
 	/* close the statement (the connection will be cached) */
 	oracleCloseStatement(session);
