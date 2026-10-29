@@ -2626,8 +2626,12 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 	const char *p = query;
 	char *used;  /* used[i - base] is nonzero if the placeholder number i occurs */
 	char name[128];
+	char err_name[128];  /* name of the first named placeholder, if any */
 	int max = base - 1;
 	int overflow = -1;  /* first placeholder number outside the allowed range */
+	int named = 0;  /* nonzero if a named placeholder was found */
+	int missing = -1;  /* first placeholder number that is missing */
+	int have_p0 = 0;  /* nonzero if the output placeholder :p0 was found */
 	int i, n;
 
 	*nocc = 0;
@@ -2752,17 +2756,14 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 			if (numstart + numlen < len || numlen == 0
 				|| (numlen > 1 && start[numstart] == '0'))
 			{
-				/* not a number, no number at all, or leading zero: named placeholder */
-				if (p_style)
-					oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
-						"the PL/SQL block uses the named bind placeholder :%s; only the positional bind placeholders :p0, :p1, ... are supported",
-						name,
-						"bind parameter values are passed as an array of strings");
-				else
-					oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
-						"the remote query uses the named bind placeholder :%s; only the positional bind placeholders :1, :2, ... are supported",
-						name,
-						"bind parameter values are passed as an array of strings");
+				/*
+				 * Not a number, no number at all, or leading zero: a named
+				 * placeholder.  The error is reported after the map of the
+				 * used placeholders has been freed.
+				 */
+				memcpy(err_name, name, (size_t)n + 1);
+				named = 1;
+				break;
 			}
 
 			if (num < base || num >= base + maxnum)
@@ -2787,24 +2788,54 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 	}
 
 	/*
+	 * Collect the results of the checks before the map of the used
+	 * placeholders is freed: an error unwinds the stack, and the memory
+	 * context is not reset until the end of the transaction.
+	 */
+	if (p_style && maxnum > 0 && used[0])
+		have_p0 = 1;
+
+	/* the placeholder numbers must be gap-free starting with "base" */
+	for (i=base; i<=max; ++i)
+		if (!used[i - base])
+		{
+			missing = i;
+			break;
+		}
+
+	oracleFree(used);
+
+	if (named)
+	{
+		if (p_style)
+			oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"the PL/SQL block uses the named bind placeholder :%s; only the positional bind placeholders :p0, :p1, ... are supported",
+				err_name,
+				"bind parameter values are passed as an array of strings");
+		else
+			oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"the remote query uses the named bind placeholder :%s; only the positional bind placeholders :1, :2, ... are supported",
+				err_name,
+				"bind parameter values are passed as an array of strings");
+	}
+
+	/*
 	 * A PL/SQL block executed with oracle_exec must assign its result to
 	 * :p0.  Report that before the generic range and gap checks, so that a
 	 * block like "BEGIN :p1 := ...; END;" gets the useful hint.
 	 */
-	if (p_style && (maxnum <= 0 || !used[0]))
+	if (p_style && !have_p0)
 		oracleError_ih(FDW_UNABLE_TO_CREATE_EXECUTION,
 			"the PL/SQL block does not assign a value to the bind placeholder :p%d",
 			0,
 			"use oracle_execute to execute a block that returns no result");
 
-	/* the placeholder numbers must be gap-free starting with "base" */
-	for (i=base; i<=max; ++i)
-		if (!used[i - base])
-			oracleError_i(FDW_UNABLE_TO_CREATE_EXECUTION,
-				p_style
-					? "the bind placeholders in the PL/SQL block are not consecutive; the bind placeholder :p%d is missing"
-					: "the bind placeholders in the remote query are not consecutive; the bind placeholder :%d is missing",
-				i);
+	if (missing >= 0)
+		oracleError_i(FDW_UNABLE_TO_CREATE_EXECUTION,
+			p_style
+				? "the bind placeholders in the PL/SQL block are not consecutive; the bind placeholder :p%d is missing"
+				: "the bind placeholders in the remote query are not consecutive; the bind placeholder :%d is missing",
+			missing);
 
 	if (overflow >= 0)
 		oracleError_i(FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2812,8 +2843,6 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 				? "the PL/SQL block uses the bind placeholder :p%d, but not enough bind parameters were supplied"
 				: "the remote query uses the bind placeholder :%d, but not enough bind parameters were supplied",
 			overflow);
-
-	oracleFree(used);
 
 	return max;
 }
