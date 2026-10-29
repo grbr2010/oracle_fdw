@@ -535,6 +535,7 @@ oracleSession
 		connp->stmtlist = NULL;
 		connp->xact_level = 0;
 		connp->readonly = 0;
+		connp->dml_in_transaction = 0;
 		connp->next = srvp->connlist;
 		srvp->connlist = connp;
 
@@ -647,6 +648,37 @@ oracleCloseConnections(void)
 }
 
 /*
+ * oracleSetDmlInTransaction
+ * 		Remember that the current transaction has modified remote data.
+ */
+void
+oracleSetDmlInTransaction(oracleSession *session)
+{
+	session->connp->dml_in_transaction = 1;
+}
+
+/*
+ * oracleDmlInTransaction
+ * 		Check if any of the cached connections has modified remote data in the
+ * 		current transaction.
+ */
+int
+oracleDmlInTransaction(void)
+{
+	struct envEntry *envp;
+	struct srvEntry *srvp;
+	struct connEntry *connp;
+
+	for (envp = envlist; envp != NULL; envp = envp->next)
+		for (srvp = envp->srvlist; srvp != NULL; srvp = srvp->next)
+			for (connp = srvp->connlist; connp != NULL; connp = connp->next)
+				if (connp->dml_in_transaction)
+					return 1;
+
+	return 0;
+}
+
+/*
  * oracleShutdown
  * 		Close all open connections, free handles, terminate Oracle.
  * 		This will be called at the end of the PostgreSQL session.
@@ -698,6 +730,9 @@ void oracleEndTransaction(void *arg, int is_commit, int noerror)
 
 	/* clear read-only status if set */
 	connarg->readonly = 0;
+
+	/* the transaction that modified the remote data is over */
+	connarg->dml_in_transaction = 0;
 
 	/* find the cached handles for the argument */
 	envp = envlist;
