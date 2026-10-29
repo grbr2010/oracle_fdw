@@ -214,8 +214,16 @@ NTT OSS Center.
     GRANT EXECUTE ON FUNCTION oracle_call(name, text, text[]) TO migrator;
     GRANT EXECUTE ON FUNCTION oracle_exec(name, text, text[]) TO migrator;
 
-`oracle_execute` сохраняет право `PUBLIC` по умолчанию ради обратной
-совместимости с существующими установками.
+`oracle_execute`, `oracle_query`, `oracle_scalar`, `oracle_call` и `oracle_exec`
+лишаются права `PUBLIC` при создании расширения или обновлении до версии 1.3,
+поскольку они могут выполнять произвольный SQL на сервере Oracle с учётными
+данными из сопоставления пользователя вызывающего.  Выдайте на них `EXECUTE`
+ролям, которым это нужно.
+
+`oracle_diag()` без аргумента показывает версии Oracle-клиента, PostgreSQL и
+oracle_fdw любому вызывающему, но переменные среды Oracle (`ORACLE_HOME`,
+`ORACLE_SID`, `TNS_ADMIN`, `TWO_TASK` и `LDAP_ADMIN`) добавляются только для
+суперпользователей.
 
 **Почему функций четыре**
 

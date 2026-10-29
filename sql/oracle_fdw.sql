@@ -5,7 +5,8 @@
 
 SET client_min_messages = WARNING;
 
-CREATE EXTENSION oracle_fdw;
+CREATE EXTENSION oracle_fdw VERSION '1.2';
+ALTER EXTENSION oracle_fdw UPDATE TO '1.3';
 
 -- TWO_TASK or ORACLE_HOME and ORACLE_SID must be set in the server's environment for this to work
 CREATE SERVER oracle FOREIGN DATA WRAPPER oracle_fdw OPTIONS (dbserver '', isolation_level 'read_committed', nchar 'true', set_timezone 'true');
@@ -817,6 +818,8 @@ SELECT oracle_exec('oracle', 'BEGIN :p0 := :p00; END;', 'x');
 -- repeated binds are allowed; Oracle counts distinct bind variables
 SELECT oracle_exec('oracle', 'BEGIN :p0 := :p1 || :p1; END;', 'a');
 SELECT oracle_exec('oracle', 'BEGIN :p0 := :p1; :p0 := :p0 || :p1; END;', 'a');
+-- uppercase bind placeholders are accepted
+SELECT oracle_exec('oracle', 'BEGIN :P0 := UPPER(:P1) || q''{'' :p99}''; END;', 'hi');
 -- NULL and empty arguments are passed as SQL NULL and an empty string
 SELECT oracle_call('oracle', 'scott.testpkg.nvl_len', NULL);
 SELECT oracle_call('oracle', 'scott.testpkg.nvl_len', '');
@@ -828,10 +831,14 @@ SELECT oracle_exec('oracle', 'BEGIN scott.p_out(:p1, :p0); END;', '7', '8');
 SELECT oracle_scalar('oracle', 'SELECT scott.f_dml(:1) FROM dual', ARRAY['q']);
 -- invalid function names are rejected
 SELECT oracle_call('oracle', 'scott."f_dml"', 'x');
+SELECT oracle_call('nosuchsrv', '');
+SELECT oracle_call('nosuchsrv', 'a.b.c.d');
+SELECT oracle_call('nosuchsrv', 'scott.f_dml.');
 -- PUBLIC has no privileges on the functions that run arbitrary remote SQL
 DROP ROLE IF EXISTS noprivs;
 CREATE ROLE noprivs;
-SELECT has_function_privilege('noprivs', 'oracle_query(name,text,text[])', 'EXECUTE') q,
+SELECT has_function_privilege('noprivs', 'oracle_execute(name,text)', 'EXECUTE') ex,
+       has_function_privilege('noprivs', 'oracle_query(name,text,text[])', 'EXECUTE') q,
        has_function_privilege('noprivs', 'oracle_scalar(name,text,text[])', 'EXECUTE') s,
        has_function_privilege('noprivs', 'oracle_call(name,text,text[])', 'EXECUTE') c,
        has_function_privilege('noprivs', 'oracle_exec(name,text,text[])', 'EXECUTE') e;

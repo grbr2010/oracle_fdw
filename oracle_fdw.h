@@ -37,6 +37,7 @@ struct connEntry
 	OCIType *geomtype;
 	struct stmtHandleEntry *stmtlist;
 	int xact_level;  /* 0 = none, 1 = main, else subtransaction */
+	int readonly;    /* is the current remote transaction read-only? */
 	struct connEntry *next;
 };
 
@@ -95,6 +96,7 @@ struct dynState
 	ora_ub2 **len;   /* array [ndef][prefetch row] of value lengths */
 	char **buf;      /* array [ndef] of prefetch * buffer size result buffers */
 	ora_sb4 *buf_size;  /* buffer size per defined column */
+	ora_sb2 *param_ind; /* NULL indicators for the bind parameters */
 };
 
 typedef struct dynState dynState;
@@ -252,6 +254,9 @@ extern void oracleStartDynamic(oracleSession *session, struct dynState *state);
 extern int oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values);
 extern void oracleCloseDynamic(oracleSession *session, struct dynState *state);
 extern int oracleColIsRaw(struct dynState *state, int col);
+extern int oracleColIsIntervalDS(struct dynState *state, int col);
+extern int oracleColIsNumberOrFloat(struct dynState *state, int col);
+extern void oracleVerifyEncoding(const char *value, int len);
 extern int oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, int *nocc);
 extern void oracleGetLob(oracleSession *session, void *locptr, oraType type, char **value, long *value_len);
 extern void oracleClientVersion(int *major, int *minor, int *update, int *patch, int *port_patch);

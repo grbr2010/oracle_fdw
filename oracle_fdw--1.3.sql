@@ -36,7 +36,7 @@ IS 'executes an arbitrary SQL statement with no results on the Oracle server';
 CREATE FUNCTION oracle_query(server name, statement text, params text[] DEFAULT NULL)
 RETURNS SETOF record
 AS 'MODULE_PATHNAME'
-LANGUAGE C;
+LANGUAGE C COST 100 ROWS 1000;
 
 COMMENT ON FUNCTION oracle_query(name, text, text[])
 IS 'executes a query with a result on the Oracle server and returns all result rows; the result types are taken from a column definition list, the statement can use the bind parameters :1, :2, ... which are set from the "params" array';
@@ -71,6 +71,7 @@ REVOKE ALL ON FUNCTION oracle_query(name, text, text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION oracle_scalar(name, text, text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION oracle_call(name, text, text[]) FROM PUBLIC;
 REVOKE ALL ON FUNCTION oracle_exec(name, text, text[]) FROM PUBLIC;
+REVOKE ALL ON FUNCTION oracle_execute(name, text) FROM PUBLIC;
 
 CREATE FOREIGN DATA WRAPPER oracle_fdw
   HANDLER oracle_fdw_handler

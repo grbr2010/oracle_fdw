@@ -46,8 +46,7 @@ static sb4 err_code;
 /* set to "1" as soon as OCIEnvCreate is called */
 static int oci_initialized = 0;
 
-/* is the current transaction read-only? */
-static int readonly = 0;
+
 
 /*
  * Linked list of open Oracle statement handles.
@@ -522,6 +521,7 @@ oracleSession
 		connp->geomtype = NULL;
 		connp->stmtlist = NULL;
 		connp->xact_level = 0;
+		connp->readonly = 0;
 		connp->next = srvp->connlist;
 		srvp->connlist = connp;
 
@@ -565,7 +565,7 @@ oracleSession
 
 		connp->xact_level = 1;
 
-		readonly = (isolation_level == ORA_TRANS_READ_ONLY);
+		connp->readonly = (isolation_level == ORA_TRANS_READ_ONLY);
 	}
 
 	/* palloc a data structure pointing to the cached entries */
@@ -681,10 +681,10 @@ void oracleEndTransaction(void *arg, int is_commit, int noerror)
 	int found = 0;
 
 	/* don't report errors on commit or rollback of read-only transactions */
-	noerror = noerror || readonly;
+	noerror = noerror || connarg->readonly;
 
 	/* clear read-only status if set */
-	readonly = 0;
+	connarg->readonly = 0;
 
 	/* find the cached handles for the argument */
 	envp = envlist;
@@ -792,7 +792,7 @@ oracleEndSubtransaction(void *arg, int nest_level, int is_commit)
 	 * has statement level rollback, so there is no need for savepoint
 	 * processing in read-only transactions.
 	 */
-	if (readonly)
+	if (ce->readonly)
 		return;
 
 	if (is_commit)
@@ -867,6 +867,7 @@ oracleEndSubtransaction(void *arg, int nest_level, int is_commit)
 		if (err_code == 1086)
 		{
 			oracleDebug2("oracle_fdw: remote transaction was ended by an implicit commit, nothing to roll back");
+			ce->xact_level = 0;
 			freeStmt(stmthp, connp, envp->errhp);
 			return;
 		}
@@ -1362,7 +1363,7 @@ oracleSetSavepoint(oracleSession *session, int nest_level)
 		 * has statement level rollback, so there is no need for savepoint
 		 * processing in read-only transactions.
 		 */
-		if (readonly)
+		if (session->connp->readonly)
 			continue;
 
 		snprintf(message, 49, "oracle_fdw: set savepoint s%d", session->connp->xact_level);
@@ -2350,6 +2351,53 @@ oracleExecuteCall(oracleSession *session, char * const stmt)
 }
 
 /*
+ * oracleCountUniqueBinds
+ * 		Count the number of unique bind variables in the prepared statement
+ * 		using OCIStmtGetBindInfo().  This works uniformly for SQL queries and
+ * 		PL/SQL blocks because duplicates are marked in the "dupl" array.
+ */
+static int
+oracleCountUniqueBinds(oracleSession *session, ub4 *nuniq)
+{
+	OraText *bvnp[8], *invp[8];
+	ub1 bvnl[8], inpl[8], dupl[8];
+	OCIBind *hndl[8];
+	ub4 startloc = 1;
+	ub4 count = 0;
+
+	for (;;)
+	{
+		sword status;
+		sb4 found = 0;
+		ub4 n, i;
+
+		status = OCIStmtGetBindInfo(session->stmthp, session->envp->errhp,
+			(ub4)8, startloc, &found, bvnp, bvnl, invp, inpl, dupl, hndl);
+
+		if (status == OCI_NO_DATA)
+			break;
+
+		if (checkerr(status, (dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS
+			|| found == 0)
+			return 0;
+
+		n = (ub4)((found < 0 ? -found : found) - (sb4)startloc + 1);
+		if (n > 8)
+			n = 8;
+
+		for (i = 0; i < n; ++i, ++startloc)
+			if (!dupl[i])
+				++count;
+
+		if (found > 0)
+			break;
+	}
+
+	*nuniq = count;
+	return 1;
+}
+
+/*
  * oracleCallFunction
  * 		Execute an anonymous PL/SQL block that has one output bind ":p0"
  * 		(a string of up to 32767 bytes) and "nargs" input binds ":p1" to
@@ -2366,7 +2414,7 @@ char *
 oracleCallFunction(oracleSession *session, const char *block, int nargs, char * const *args, int nbinds)
 {
 	OCIBind *bndhp = NULL;
-	sb2 out_ind = 0;
+	sb2 out_ind = -1;
 	ub2 out_len = 0;
 	ub4 bind_count;
 	sb2 *in_ind = NULL;
@@ -2394,17 +2442,13 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 	registerStmt(session->stmthp, session->envp->envhp, session->connp);
 
 	/*
-	 * Cross-check the lexical placeholder analysis against the bind count
-	 * reported by Oracle.  For PL/SQL blocks Oracle counts distinct bind
-	 * variables, not occurrences, so repeated placeholders do not increase
-	 * the count.  A mismatch means that the parser did not understand the
-	 * block, so report a clear error instead of a confusing OCI bind error
-	 * later.
+	 * Cross-check the lexical placeholder analysis against the number of
+	 * unique bind variables reported by Oracle.  Repeated placeholders do
+	 * not increase the count.  A mismatch means that the parser did not
+	 * understand the block, so report a clear error instead of a confusing
+	 * OCI bind error later.
 	 */
-	if (checkerr(
-		OCIAttrGet((dvoid *)session->stmthp, (ub4)OCI_HTYPE_STMT,
-			(dvoid *)&bind_count, (ub4 *)0, (ub4)OCI_ATTR_BIND_COUNT, session->envp->errhp),
-		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) == OCI_SUCCESS
+	if (oracleCountUniqueBinds(session, &bind_count)
 		&& bind_count != (ub4)nbinds)
 	{
 		oracleError_ii(FDW_UNABLE_TO_CREATE_EXECUTION,
@@ -2414,6 +2458,7 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 
 	/* bind the output parameter :p0 (PL/SQL VARCHAR2 can hold 32767 bytes) */
 	outbuf = oracleAlloc(32768);
+	outbuf[0] = '\0';
 	if (checkerr(
 		OCIBindByName(session->stmthp, &bndhp, session->envp->errhp,
 			(text *)":p0", (sb4)3,
@@ -2457,6 +2502,12 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 			(CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, OCI_DEFAULT),
 		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
 	{
+		if (err_code == 6502)
+			oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"the result of the PL/SQL block is too large for the remote server",
+				oraMessage,
+				"Return at most 32767 bytes or use oracle_scalar or oracle_query for CLOB results.");
+
 		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
 			"error executing statement: OCIStmtExecute failed to execute PL/SQL block",
 			oraMessage);
@@ -2469,17 +2520,22 @@ oracleCallFunction(oracleSession *session, const char *block, int nargs, char * 
 	}
 	else
 	{
-		if (out_ind < -1)
+		if (out_ind != 0)
 			oracleError(FDW_UNABLE_TO_CREATE_EXECUTION,
 				"the result of the PL/SQL block was truncated on the remote server");
 
 		result = oracleAlloc((size_t)out_len + 1);
+		oracleVerifyEncoding(outbuf, (int)out_len);
 		memcpy(result, outbuf, out_len);
 		result[out_len] = '\0';
 	}
 
 	/* close the statement (the connection will be cached) */
 	oracleCloseStatement(session);
+
+	oracleFree(outbuf);
+	if (in_ind != NULL)
+		oracleFree(in_ind);
 
 	return result;
 }
@@ -2633,7 +2689,7 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 			 * The number must not have leading zeroes (":01" is a different
 			 * bind name than ":1" for Oracle) and must not be unreasonably long.
 			 */
-			numstart = (p_style && len > 0 && start[0] == 'p');
+			numstart = (p_style && len > 0 && (start[0] == 'p' || start[0] == 'P'));
 			for (numlen = 0; numstart + numlen < len
 				&& start[numstart + numlen] >= '0' && start[numstart + numlen] <= '9'; ++numlen)
 			{
@@ -2810,11 +2866,8 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 			"the number of bind variables in the remote query (%d) does not match the number of parameters (%d)",
 			maxpl, nparams);
 
-	if (checkerr(
-		OCIAttrGet((dvoid *)session->stmthp, (ub4)OCI_HTYPE_STMT,
-			(dvoid *)&bind_count, (ub4 *)0, (ub4)OCI_ATTR_BIND_COUNT, session->envp->errhp),
-		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) == OCI_SUCCESS
-		&& bind_count != (ub4)nocc)
+	if (oracleCountUniqueBinds(session, &bind_count)
+		&& bind_count != (ub4)nparams)
 	{
 		oracleError_ii(FDW_UNABLE_TO_CREATE_EXECUTION,
 			"the number of bind variables in the remote query (%d) does not match the number of parameters (%d)",
@@ -2847,6 +2900,9 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 					oraMessage);
 			}
 		}
+
+		/* the names are no longer needed; the indicators must outlive execution */
+		oracleFree(param_name);
 	}
 
 	/*
@@ -2891,6 +2947,7 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 	state->len = oracleAlloc(state->ndef * sizeof(ub2 *));
 	state->buf = oracleAlloc(state->ndef * sizeof(char *));
 	state->buf_size = oracleAlloc(state->ndef * sizeof(sb4));
+	state->param_ind = param_ind;
 
 	/* loop through the select list, define the first "ndef" result values as strings */
 	for (i=1; i<=state->ndef; ++i)
@@ -3087,7 +3144,6 @@ oracleStartDynamic(oracleSession *session, struct dynState *state)
 {
 	sword result;
 	ub4 rowcount;
-	unsigned int prefetch = (unsigned int)state->prefetch;
 
 	/*
 	 * Execute the query; the OCI prefetch size of 1 makes the remote server
@@ -3127,17 +3183,6 @@ oracleStartDynamic(oracleSession *session, struct dynState *state)
 			oraMessage);
 	}
 
-	/* enable prefetching for the batches fetched by oracleFetchDynamic */
-	if (checkerr(
-		OCIAttrSet((dvoid *)session->stmthp, OCI_HTYPE_STMT, (dvoid *)&prefetch, 0,
-			OCI_ATTR_PREFETCH_ROWS, session->envp->errhp),
-		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
-	{
-		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
-			"error executing query: OCIAttrSet failed to set number of prefetched rows in statement handle",
-			oraMessage);
-	}
-
 	session->last_batch = (result == OCI_NO_DATA);
 	session->fetched_rows = (unsigned int)rowcount;
 	session->current_row = 0;
@@ -3167,6 +3212,26 @@ oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values
 	if (idx == 0)
 		return 0;
 
+	/*
+	 * Now that the first row has been fetched, raise the prefetch size for
+	 * subsequent fetches.  Doing this earlier would make the first fetch
+	 * retrieve more than one row.
+	 */
+	if (session->fetched_rows == 1 && session->current_row == 1 && state->prefetch > 1)
+	{
+		unsigned int prefetch = (unsigned int)state->prefetch;
+
+		if (checkerr(
+			OCIAttrSet((dvoid *)session->stmthp, OCI_HTYPE_STMT, (dvoid *)&prefetch, 0,
+				OCI_ATTR_PREFETCH_ROWS, session->envp->errhp),
+			(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
+		{
+			oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
+				"error executing query: OCIAttrSet failed to set number of prefetched rows in statement handle",
+				oraMessage);
+		}
+	}
+
 	r = idx - 1;
 
 	for (c=0; c<state->ndef; ++c)
@@ -3179,11 +3244,13 @@ oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values
 		{
 			char *value = oracleAlloc((size_t)state->len[c][r] + 1);
 
-			if (state->ind[c][r] < -1)
+			if (state->ind[c][r] != 0)
 				oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
 					"the value of column %s was truncated on the remote server",
 					state->colname[c],
 					"use CAST or TO_CHAR to convert the column to a shorter representation");
+
+			oracleVerifyEncoding(state->buf[c] + (size_t)r * state->buf_size[c], (int)state->len[c][r]);
 
 			memcpy(value, state->buf[c] + (size_t)r * state->buf_size[c], state->len[c][r]);
 			value[state->len[c][r]] = '\0';
@@ -3224,6 +3291,8 @@ oracleCloseDynamic(oracleSession *session, struct dynState *state)
 	oracleFree(state->len);
 	oracleFree(state->buf);
 	oracleFree(state->buf_size);
+	if (state->param_ind != NULL)
+		oracleFree(state->param_ind);
 
 	oracleFree(state);
 }
@@ -3239,6 +3308,28 @@ oracleColIsRaw(struct dynState *state, int col)
 	return state->coltype[col] == SQLT_BIN;
 }
 
+
+/*
+ * oracleColIsIntervalDS
+ * 		Return 1 if the result column "col" of a dynamic query has the Oracle
+ * 		data type INTERVAL DAY TO SECOND, else 0.
+ */
+int
+oracleColIsIntervalDS(struct dynState *state, int col)
+{
+	return state->coltype[col] == SQLT_INTERVAL_DS;
+}
+
+/*
+ * oracleColIsNumberOrFloat
+ * 		Return 1 if the result column "col" of a dynamic query has the Oracle
+ * 		data type NUMBER or FLOAT, else 0.
+ */
+int
+oracleColIsNumberOrFloat(struct dynState *state, int col)
+{
+	return state->coltype[col] == SQLT_NUM || state->coltype[col] == SQLT_FLT;
+}
 
 /*
  * oracleGetLob
