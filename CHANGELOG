@@ -70,6 +70,11 @@ Version 2.10.0
     function that modifies data (ORA-14551).
   - Require PostgreSQL 15 or better, since PostgreSQL 14 support ended in
     November 2026.
+  - Add a procedure for replacing an existing installation that was built
+    from the original repository with the version from this fork, in
+    doc/upgrade-to-fork.md.  It describes how to switch the source tree,
+    how to save the current privileges before the upgrade revokes EXECUTE
+    on oracle_execute from PUBLIC, and how to roll back.
 
 Version 2.9.0, released 2026-06-08
 
