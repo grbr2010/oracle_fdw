@@ -1184,6 +1184,11 @@ Note that the extension version as shown by the psql command `\dx` or the
 system catalog `pg_available_extensions` is *not* the installed version
 of oracle_fdw.  To get the oracle_fdw version, use the function `oracle_diag`.
 
+If you have installed oracle_fdw from the original repository
+<https://github.com/laurenz/oracle_fdw> and want to replace it with the
+version from the fork <https://github.com/grbr2010/oracle_fdw>, follow the
+procedure in [doc/upgrade-to-fork.md](doc/upgrade-to-fork.md).
+
 Running the regression tests:
 -----------------------------
 

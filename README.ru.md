@@ -1228,6 +1228,11 @@ PostgreSQL мог её найти.  Способ зависит от опера�
 версия oracle_fdw.  Чтобы узнать версию oracle_fdw, используйте функцию
 `oracle_diag`.
 
+Если вы устанавливали oracle_fdw из оригинального репозитория
+<https://github.com/laurenz/oracle_fdw> и хотите заменить его версией из
+форка <https://github.com/grbr2010/oracle_fdw>, следуйте процедуре из
+[doc/upgrade-to-fork.ru.md](doc/upgrade-to-fork.ru.md).
+
 Запуск регрессионных тестов:
 ----------------------------
 
