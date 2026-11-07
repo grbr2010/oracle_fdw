@@ -914,7 +914,9 @@ oracleEndSubtransaction(void *arg, int nest_level, int is_commit)
 		 */
 		if (err_code == 1086)
 		{
-			oracleDebug2("oracle_fdw: remote transaction was ended by an implicit commit, nothing to roll back");
+			oracleWarning_d(
+				"remote transaction was ended by an implicit commit; nothing to roll back",
+				oraMessage);
 			ce->xact_level = 0;
 			freeStmt(stmthp, connp, envp->errhp);
 			return;
@@ -2576,11 +2578,11 @@ oracleExecuteBlock(oracleSession *session, oraBlock *call)
 			(CONST OCISnapshot *)NULL, (OCISnapshot *)NULL, OCI_DEFAULT),
 		(dvoid *)session->envp->errhp, OCI_HTYPE_ERROR) != OCI_SUCCESS)
 	{
-		if (err_code == 6502)
+		if (err_code == 6502 && strstr(oraMessage, "buffer too small") != NULL)
 			oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
 				"the result of the PL/SQL block is too large for the remote server: %s",
 				oraMessage,
-				"Return at most 32767 bytes or use oracle_scalar or oracle_query for CLOB results.");
+				"Return at most 32767 bytes.");
 
 		oracleError_d(FDW_UNABLE_TO_CREATE_EXECUTION,
 			"error executing statement: OCIStmtExecute failed to execute PL/SQL block",
@@ -2782,6 +2784,10 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 				|| (*p >= '0' && *p <= '9') || *p == '_' || *p == '$' || *p == '#')
 				++p;
 			len = (int)(p - start);
+
+			/* a lone ':' is not a bind placeholder */
+			if (len == 0)
+				continue;
 
 			/* copy the placeholder name for error messages */
 			n = len < (int)sizeof(name) - 1 ? len : (int)sizeof(name) - 1;
