@@ -1007,7 +1007,7 @@ oracle_query(PG_FUNCTION_ARGS)
 				for (c=0; c<qstate->state->ndef; ++c)
 					if (values[c] != NULL
 						&& oracleColIsRaw(qstate->state, c)
-						&& TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid == BYTEAOID)
+						&& getBaseType(TupleDescAttr(qstate->attinmeta->tupdesc, c)->atttypid) == BYTEAOID)
 						values[c] = psprintf("\\x%s", values[c]);
 
 				/*
