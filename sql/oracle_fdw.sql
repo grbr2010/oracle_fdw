@@ -705,6 +705,8 @@ SELECT oracle_scalar('oracle', $q$SELECT q'!a :1!' FROM dual$q$);
 SELECT oracle_scalar('oracle', $q$SELECT q'[a :1]' || :1 FROM dual$q$, ARRAY['X']);
 -- a q'...' sequence inside an ordinary string literal is not a q-quote
 SELECT oracle_scalar('oracle', $q$SELECT 'q''[a:1]' FROM dual$q$);
+-- a colon that is not followed by an identifier is not a bind placeholder
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual WHERE JSON_OBJECT(''a'' : 1) IS NOT NULL');
 -- oracle_scalar stops after the first row and only defines the first column
 SELECT oracle_scalar('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END FROM dual CONNECT BY level <= 2');
 SELECT oracle_scalar('oracle', 'SELECT 42, TO_CLOB(''x'') FROM dual');
@@ -941,6 +943,9 @@ SELECT oracle_scalar('oracle', 'SELECT ''a'' || CHR(0) || ''b'' FROM dual');
 
 -- a block that does not assign :p0 returns NULL
 SELECT oracle_exec('oracle', 'BEGIN IF 1 = 0 THEN :p0 := ''x''; END IF; END;') IS NULL AS is_null;
+-- ORA-06502 that is not "buffer too small" is reported with the original Oracle message
+SELECT oracle_exec('oracle', 'BEGIN :p0 := TO_NUMBER(''abc''); END;');
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual');
 
 -- a remote DML keeps the connection open until the transaction ends
 BEGIN;

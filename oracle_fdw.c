@@ -7942,6 +7942,18 @@ oracleDebug2(const char *message)
 }
 
 /*
+ * oracleWarning_d
+ * 		Report a PostgreSQL message at level WARNING with a detail.
+ */
+void
+oracleWarning_d(const char *message, const char *detail)
+{
+	ereport(WARNING,
+			(errmsg("%s", message),
+			 errdetail("%s", detail)));
+}
+
+/*
  * initializePostGIS
  * 		Checks if PostGIS is installed and sets GEOMETRYOID if it is.
  */

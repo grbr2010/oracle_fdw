@@ -30,8 +30,22 @@ Version 2.10.0
   - Recognize Oracle alternative quoting (q'...' and nq'...') when checking
     bind placeholders, so that placeholders inside such string literals are
     not bound.
+  - Allow a colon that is not followed by an identifier (for example in
+    JSON_OBJECT('key' : value)) in SQL passed to oracle_query and oracle_exec;
+    only actual bind placeholders are rejected now.
+  - Report a WARNING when rolling back to a savepoint fails with ORA-01086
+    because the remote transaction was already ended by an implicit commit.
+  - Do not report a misleading "result too large" message for ORA-06502 errors
+    that are not "buffer too small"; the original Oracle error message is
+    reported instead.
 
   Enhancements:
+  - If transaction_read_only is on (including on a hot standby), open the
+    remote Oracle transaction as READ ONLY.  This causes DML sent through
+    oracle_execute, oracle_call or oracle_exec to fail, matching the local
+    read-only transaction.  DDL or an explicit COMMIT inside a called PL/SQL
+    block still ends the remote transaction without setting the
+    "transaction has modified Oracle data" flag.
   - Add a CI workflow that automatically tests new commits against PostgreSQL
     v18 and both Oracle server 21/client 19 and Oracle server 23/client 23.
     Patch by Ziming Zhang.

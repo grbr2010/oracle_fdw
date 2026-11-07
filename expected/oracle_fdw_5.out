@@ -16,6 +16,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 DO
 $$BEGIN
    SELECT oracle_execute('oracle', 'DROP TABLE scott.typetest1 PURGE');
@@ -23,6 +26,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 DO
 $$BEGIN
    SELECT oracle_execute('oracle', 'DROP MATERIALIZED VIEW scott.mattest2');
@@ -30,6 +36,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 DO
 $$BEGIN
    SELECT oracle_execute('oracle', 'DROP TABLE scott.typetest2 PURGE');
@@ -37,6 +46,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 DO
 $$BEGIN
    SELECT oracle_execute('oracle', 'DROP TABLE scott.gis PURGE');
@@ -44,6 +56,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 SELECT oracle_execute(
           'oracle',
           E'CREATE TABLE scott.typetest1 (\n'
@@ -1151,6 +1166,13 @@ SELECT oracle_scalar('oracle', $q$SELECT 'q''[a:1]' FROM dual$q$);
  q'[a:1]
 (1 row)
 
+-- a colon that is not followed by an identifier is not a bind placeholder
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual WHERE JSON_OBJECT(''a'' : 1) IS NOT NULL');
+ oracle_scalar 
+---------------
+ 1
+(1 row)
+
 -- oracle_scalar stops after the first row and only defines the first column
 SELECT oracle_scalar('oracle', 'SELECT CASE WHEN level = 1 THEN 1 ELSE 1/0 END FROM dual CONNECT BY level <= 2');
  oracle_scalar 
@@ -1273,6 +1295,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 DO
 $$BEGIN
    PERFORM oracle_execute('oracle', 'DROP FUNCTION scott.f_dml');
@@ -1280,6 +1305,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 DO
 $$BEGIN
    PERFORM oracle_execute('oracle', 'DROP TABLE scott.dmltest PURGE');
@@ -1287,6 +1315,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 SELECT oracle_execute('oracle', 'CREATE TABLE scott.dmltest (v varchar2(10))');
  oracle_execute 
 ----------------
@@ -1494,6 +1525,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 SELECT oracle_execute('oracle', 'CREATE TABLE scott.subx_test (v varchar2(10))');
  oracle_execute 
 ----------------
@@ -1539,6 +1573,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 SELECT * FROM oracle_query('oracle', 'SELECT v FROM scott.subx_test') AS q(v text);
  v 
 ---
@@ -1561,6 +1598,9 @@ EXCEPTION
    WHEN OTHERS THEN
       NULL;
 END;$$;
+WARNING:  remote transaction was ended by an implicit commit; nothing to roll back
+DETAIL:  ORA-01086: savepoint 'S2' never established in this session or is invalid
+Help: https://docs.oracle.com/error-help/db/ora-01086/
 SELECT oracle_execute('oracle', 'CREATE TABLE scott.dynfix_test (v varchar2(10))');
  oracle_execute 
 ----------------
@@ -1623,6 +1663,18 @@ SELECT oracle_exec('oracle', 'BEGIN IF 1 = 0 THEN :p0 := ''x''; END IF; END;') I
  is_null 
 ---------
  t
+(1 row)
+
+-- ORA-06502 that is not "buffer too small" is reported with the original Oracle message
+SELECT oracle_exec('oracle', 'BEGIN :p0 := TO_NUMBER(''abc''); END;');
+ERROR:  error executing statement: OCIStmtExecute failed to execute PL/SQL block
+DETAIL:  ORA-06502: PL/SQL: value or conversion error: character to number conversion error
+ORA-06512: at line 1
+Help: https://docs.oracle.com/error-help/db/ora-06502/
+SELECT oracle_scalar('oracle', 'SELECT 1 FROM dual');
+ oracle_scalar 
+---------------
+ 1
 (1 row)
 
 -- a remote DML keeps the connection open until the transaction ends

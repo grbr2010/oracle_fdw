@@ -417,8 +417,8 @@ The arguments are bound as strings to the positional bind parameters `:p1`,
 `:p2`, ... (a NULL argument binds SQL NULL); the function result is returned
 as `text` (NULL if the function returns NULL).  The result can be at most
 32767 bytes, the maximum length of a PL/SQL `VARCHAR2`; for longer results,
-write them to a table or return a CLOB and read it with `oracle_query` (CLOB
-results are not supported).
+write them to a table or return them in another way that fits into 32767
+bytes.
 
 The DML performed by the function participates in the local transaction: it
 is committed or rolled back with the PostgreSQL transaction, including
@@ -492,6 +492,14 @@ While a remote transaction has modified Oracle data, the Oracle connections
 cannot be closed: `oracle_close_connections` fails with an error.  This is
 tracked per connection, and the state is cleared when the remote transaction
 of that connection ends.
+
+If the PostgreSQL transaction is read-only (`transaction_read_only = on`,
+including on a hot standby), the remote Oracle transaction is opened as
+READ ONLY.  `oracle_execute`, `oracle_call` and `oracle_exec` will therefore
+reject DML in such transactions.  However, a DDL statement or an explicit
+`COMMIT` inside a called PL/SQL block ends the read-only Oracle transaction
+without setting the ``transaction has modified Oracle data'' flag, so the
+connection can still be closed with `oracle_close_connections`.
 
 A `statement_timeout` in PostgreSQL cancels the remote query as well: the
 Oracle session is interrupted and the remote statement is aborted.
