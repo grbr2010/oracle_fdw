@@ -754,7 +754,7 @@ oracle_execute(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
-		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
+		if (!XactReadOnly)
 			oracleSetDmlInTransaction(session);
 
 		oracleExecuteCall(session, stmt);
@@ -849,10 +849,11 @@ struct queryState
  * queryCleanup
  * 		Memory context callback that closes the dynamic query when the SRF's
  * 		multi-call memory context is reset before the query was closed, e.g.
- * 		when the consumer stops fetching early or the query is canceled.
- * 		It must not be reached while the transaction is aborting (the close
- * 		paths in oracle_query take care of that), so it can assume that the
- * 		statement is still open.
+ * 		when the consumer stops fetching early, the query is canceled or an
+ * 		error such as statement_timeout or temp_file_limit is thrown.
+ * 		The callback may also be reached during transaction abort, so it must
+ * 		not rely on a clean state; closing the statement is safe because the
+ * 		OCI close paths tolerate errors.
  */
 static void
 queryCleanup(void *arg)
@@ -1252,7 +1253,7 @@ oracle_call(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
-		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
+		if (!XactReadOnly)
 			oracleSetDmlInTransaction(session);
 
 		oraclePrepareBlock(session, buf.data, nargs, args, nargs + 1, call);
@@ -1329,7 +1330,7 @@ oracle_exec(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
-		if (strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") != 0)
+		if (!XactReadOnly)
 			oracleSetDmlInTransaction(session);
 
 		oraclePrepareBlock(session, block, nargs, args, nargs + 1, call);
@@ -1938,7 +1939,7 @@ oracleBeginForeignScan(ForeignScanState *node, int eflags)
 	/* connect to Oracle database */
 	fdw_state->session = oracleGetSession(
 			fdw_state->dbserver,
-			((strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") == 0)
+			(XactReadOnly
 				? ORA_TRANS_READ_ONLY
 				: fdw_state->isolation_level),
 			fdw_state->user,
@@ -2444,7 +2445,7 @@ oracleBeginForeignModify(ModifyTableState *mtstate, ResultRelInfo *rinfo, List *
 	/* connect to Oracle database */
 	fdw_state->session = oracleGetSession(
 			fdw_state->dbserver,
-			((strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") == 0)
+			(XactReadOnly
 				? ORA_TRANS_READ_ONLY
 				: fdw_state->isolation_level),
 			fdw_state->user,
@@ -2572,7 +2573,7 @@ void oracleBeginForeignInsert(ModifyTableState *mtstate, ResultRelInfo *rinfo)
 
 	fdw_state->session = oracleGetSession(
 			fdw_state->dbserver,
-			((strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") == 0)
+			(XactReadOnly
 				? ORA_TRANS_READ_ONLY
 				: fdw_state->isolation_level),
 			fdw_state->user,
@@ -3405,7 +3406,7 @@ struct OracleFdwState
 	/* connect to Oracle database */
 	fdwState->session = oracleGetSession(
 		fdwState->dbserver,
-		((strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") == 0)
+		(XactReadOnly
 			? ORA_TRANS_READ_ONLY
 			: fdwState->isolation_level),
 		fdwState->user,
@@ -6110,7 +6111,7 @@ oracleConnectServer(Name srvname)
 	 */
 	return oracleGetSession(
 		dbserver,
-		(strcmp(GetConfigOptionByName("transaction_read_only", NULL), "on") == 0)
+		(XactReadOnly)
 			? ORA_TRANS_READ_ONLY
 			: isolation_level,
 		user,

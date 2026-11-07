@@ -2728,29 +2728,19 @@ oracleCheckPlaceholders(const char *query, int base, int maxnum, int p_style, in
 
 		if (*p == '\'')
 		{
-			/* string literal; '' is an escaped single quote */
+			/* string literal */
 			++p;
 			while (*p != '\0' && *p != '\'')
-			{
-				if (p[0] == '\'' && p[1] == '\'')
-					p += 2;
-				else
-					++p;
-			}
+				++p;
 			if (*p != '\0')
 				++p;
 		}
 		else if (*p == '"')
 		{
-			/* quoted identifier; "" is an escaped double quote */
+			/* quoted identifier */
 			++p;
 			while (*p != '\0' && *p != '"')
-			{
-				if (p[0] == '"' && p[1] == '"')
-					p += 2;
-				else
-					++p;
-			}
+				++p;
 			if (*p != '\0')
 				++p;
 		}
@@ -2949,10 +2939,9 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 	registerStmt(session->stmthp, session->envp->envhp, session->connp);
 
 	/*
-	 * Fetch at most one row when the statement is executed; the prefetch size
-	 * for the batches fetched by oracleFetchDynamic is set in
-	 * oracleStartDynamic, so that the remote server only has to evaluate the
-	 * first row for the execution.
+	 * Set the OCI prefetch size to 1.  oracleFetchDynamic fetches the first
+	 * row individually and only raises the prefetch size for the remaining
+	 * rows after that.
 	 */
 	{
 		unsigned int one = 1;
@@ -3343,8 +3332,7 @@ oracleStartDynamic(oracleSession *session, struct dynState *state)
 	ub4 rowcount;
 
 	/*
-	 * Execute the query; the OCI prefetch size of 1 makes the remote server
-	 * evaluate only the first row.
+	 * Execute the query; rows are fetched on demand by oracleFetchDynamic.
 	 */
 	result = checkerr(
 		OCIStmtExecute(session->connp->svchp, session->stmthp, session->envp->errhp, (ub4)0, (ub4)0,
@@ -3400,8 +3388,9 @@ oracleFetchDynamic(oracleSession *session, struct dynState *state, char **values
 
 	/*
 	 * Fetch a single row the first time, so that a consumer that stops after
-	 * the first row does not make the remote server evaluate more rows; the
-	 * remaining rows are fetched in batches of the prefetch size.
+	 * the first row does not make the remote server evaluate more rows.  The
+	 * remaining rows are fetched in batches after the prefetch size has been
+	 * raised.
 	 */
 	idx = oracleFetchNext(session,
 		(session->fetched_rows == 0 && session->current_row == 0) ? 1 : state->prefetch);
