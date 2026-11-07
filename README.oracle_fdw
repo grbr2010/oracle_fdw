@@ -425,6 +425,11 @@ is committed or rolled back with the PostgreSQL transaction, including
 savepoints and subtransactions.  This does not apply to operations that
 follow their own commit rules, like autonomous transactions or DDL.
 
+In a read-write transaction, `oracle_call` conservatively marks the
+connection as having modified Oracle data even if the called function only
+reads data.  Therefore `oracle_close_connections()` fails until the local
+transaction ends after any `oracle_call`, just as it does after DML.
+
 **oracle_exec in detail**
 
 `oracle_exec` executes an anonymous PL/SQL block that returns a result.
