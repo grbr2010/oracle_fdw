@@ -104,3 +104,16 @@ SELECT t1.id FROM typetest1  t1 WHERE EXISTS (SELECT 1 FROM typetest1  t2 WHERE 
   3
 (2 rows)
 
+-- Oracle 23 supports the BOOLEAN data type in SQL; it is returned as text
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(1 AS BOOLEAN) b FROM dual') AS q(b boolean);
+ERROR:  error describing query: OCIStmtExecute failed to describe remote query
+DETAIL:  ORA-00902: invalid datatype
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(0 AS BOOLEAN) b FROM dual') AS q(b boolean);
+ERROR:  error describing query: OCIStmtExecute failed to describe remote query
+DETAIL:  ORA-00902: invalid datatype
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(NULL AS BOOLEAN) b FROM dual') AS q(b boolean);
+ERROR:  error describing query: OCIStmtExecute failed to describe remote query
+DETAIL:  ORA-00902: invalid datatype
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(1 AS BOOLEAN) b FROM dual') AS q(b text);
+ERROR:  error describing query: OCIStmtExecute failed to describe remote query
+DETAIL:  ORA-00902: invalid datatype

@@ -42,3 +42,9 @@ SELECT 1 FROM (SELECT 1 FROM typetest1  WHERE false) AS subq1 RIGHT JOIN typetes
 EXPLAIN (COSTS off)
 SELECT t1.id FROM typetest1  t1 WHERE EXISTS (SELECT 1 FROM typetest1  t2 WHERE t1.d = t2.d) ORDER BY t1.id;
 SELECT t1.id FROM typetest1  t1 WHERE EXISTS (SELECT 1 FROM typetest1  t2 WHERE t1.d = t2.d) ORDER BY t1.id;
+
+-- Oracle 23 supports the BOOLEAN data type in SQL; it is returned as text
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(1 AS BOOLEAN) b FROM dual') AS q(b boolean);
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(0 AS BOOLEAN) b FROM dual') AS q(b boolean);
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(NULL AS BOOLEAN) b FROM dual') AS q(b boolean);
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(1 AS BOOLEAN) b FROM dual') AS q(b text);

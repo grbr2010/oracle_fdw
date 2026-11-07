@@ -305,8 +305,9 @@ settings of the session, then converted to the PostgreSQL types from the
 column definition list using the type input functions.
 Only data types with a sensible string representation are supported in the
 select list (CHAR/VARCHAR2, NUMBER, FLOAT, BINARY_FLOAT, BINARY_DOUBLE, DATE,
-TIMESTAMP, INTERVAL and RAW); convert other types (LOBs, LONG and
-user-defined types) explicitly with CAST or TO_CHAR.
+TIMESTAMP, INTERVAL, RAW, ROWID/UROWID and, with Oracle 23 and later,
+BOOLEAN); convert other types (LOBs, LONG and user-defined types) explicitly
+with CAST or TO_CHAR.
 A RAW column is transferred as a hex string: declare the result column as
 `text` to get the hex representation, or as `bytea` to get the binary value.
 

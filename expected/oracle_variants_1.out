@@ -107,3 +107,28 @@ SELECT t1.id FROM typetest1  t1 WHERE EXISTS (SELECT 1 FROM typetest1  t2 WHERE 
   3
 (2 rows)
 
+-- Oracle 23 supports the BOOLEAN data type in SQL; it is returned as text
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(1 AS BOOLEAN) b FROM dual') AS q(b boolean);
+ b 
+---
+ t
+(1 row)
+
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(0 AS BOOLEAN) b FROM dual') AS q(b boolean);
+ b 
+---
+ f
+(1 row)
+
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(NULL AS BOOLEAN) b FROM dual') AS q(b boolean);
+ b 
+---
+ 
+(1 row)
+
+SELECT * FROM oracle_query('oracle', 'SELECT CAST(1 AS BOOLEAN) b FROM dual') AS q(b text);
+  b   
+------
+ TRUE
+(1 row)
+

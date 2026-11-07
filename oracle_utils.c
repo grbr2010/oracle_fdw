@@ -3233,6 +3233,19 @@ oraclePrepareDynamic(oracleSession *session, const char *query, int nparams, cha
 			case SQLT_BIN:  /* RAW(n) */
 				state->buf_size[i-1] = (sb4)bin_size * 2 + 1;
 				break;
+			case SQLT_RDD:  /* ROWID and UROWID */
+				/*
+				 * A UROWID can be up to 4000 bytes long; its string
+				 * representation uses one character per byte.
+				 */
+				state->buf_size[i-1] = 4001;
+				break;
+#ifdef SQLT_BOL
+			case SQLT_BOL:  /* BOOLEAN (Oracle 23 and later) */
+				/* the string representation is TRUE, FALSE or NULL */
+				state->buf_size[i-1] = 6;
+				break;
+#endif
 			default:
 				oracleError_sd(FDW_UNABLE_TO_CREATE_EXECUTION,
 					"column %s in the remote query has a data type that cannot be converted",

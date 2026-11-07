@@ -1264,6 +1264,19 @@ SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS
 (1 row)
 
 DROP DOMAIN rawbytea;
+-- ROWID and UROWID are returned as strings
+SELECT length(r) FROM oracle_query('oracle', 'SELECT ROWID r FROM dual') AS q(r text);
+ length 
+--------
+     18
+(1 row)
+
+SELECT length(r) FROM oracle_query('oracle', 'SELECT CAST(ROWID AS UROWID) r FROM dual') AS q(r text);
+ length 
+--------
+     18
+(1 row)
+
 -- data types and Unicode in the select list (TIMESTAMPTZ is declared text
 -- because its rendering depends on the session time zone)
 SELECT * FROM oracle_query('oracle',
