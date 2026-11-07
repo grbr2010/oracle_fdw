@@ -65,6 +65,9 @@ Version 2.10.0
     limit into the remote statement if you need to reduce remote work.
     oracle_scalar reads only the first row and the first column of the
     result.
+  - Support ROWID, UROWID and the BOOLEAN data type introduced in Oracle 23
+    in oracle_query and oracle_scalar.  They are returned as strings and can
+    be declared as text (BOOLEAN as boolean or text).
   - Add the functions oracle_call and oracle_exec that call remote functions
     that modify data and remote procedures with OUT parameters through an
     anonymous PL/SQL block, which a query cannot do.

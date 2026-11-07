@@ -737,6 +737,9 @@ SELECT * FROM oracle_query('oracle', 'SELECT CAST(NULL AS RAW(1)) r FROM dual') 
 CREATE DOMAIN rawbytea AS bytea;
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r rawbytea);
 DROP DOMAIN rawbytea;
+-- ROWID and UROWID are returned as strings
+SELECT length(r) FROM oracle_query('oracle', 'SELECT ROWID r FROM dual') AS q(r text);
+SELECT length(r) FROM oracle_query('oracle', 'SELECT CAST(ROWID AS UROWID) r FROM dual') AS q(r text);
 -- data types and Unicode in the select list (TIMESTAMPTZ is declared text
 -- because its rendering depends on the session time zone)
 SELECT * FROM oracle_query('oracle',
