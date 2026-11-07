@@ -1,5 +1,11 @@
 Version 2.10.0
 
+  Incompatible changes:
+  - Revoke EXECUTE on oracle_execute from PUBLIC when the extension is
+    updated to version 1.3.  Previously every role could execute arbitrary
+    SQL on the Oracle server with the credentials of its user mapping.
+    After the upgrade, grant EXECUTE to the roles that need it.
+
   Bugfixes:
   - Fix an error when modifying multiple foreign tables in a single statement.
     If the tables have different column layouts, this could cause the error
