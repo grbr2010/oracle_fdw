@@ -733,6 +733,10 @@ SELECT oracle_scalar('oracle', 'SELECT 98 FROM dual');
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r bytea);
 SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r text);
 SELECT * FROM oracle_query('oracle', 'SELECT CAST(NULL AS RAW(1)) r FROM dual') AS q(r bytea);
+-- a domain over bytea is treated like bytea
+CREATE DOMAIN rawbytea AS bytea;
+SELECT * FROM oracle_query('oracle', 'SELECT hextoraw(''4142'') r FROM dual') AS q(r rawbytea);
+DROP DOMAIN rawbytea;
 -- data types and Unicode in the select list (TIMESTAMPTZ is declared text
 -- because its rendering depends on the session time zone)
 SELECT * FROM oracle_query('oracle',
