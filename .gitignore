@@ -28,6 +28,10 @@ regression.diffs
 CVS
 .svn
 
+# local agent and analysis artifacts
+.opencode/
+graphify-out/
+
 # Windows build, build output
 v15
 msvc/*.opensdf
