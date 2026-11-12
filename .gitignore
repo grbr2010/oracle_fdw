@@ -41,6 +41,5 @@ msvc/*.vcxproj.filters
 msvc/Win32
 msvc/x64
 
-# graphify: граф знаний и конфиг, генерируются локально
+# graphify: граф знаний (артефакты)
 graphify-out/
-.graphifyrc
