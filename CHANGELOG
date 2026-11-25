@@ -43,6 +43,13 @@ Version 2.10.0
   - Do not report a misleading "result too large" message for ORA-06502 errors
     that are not "buffer too small"; the original Oracle error message is
     reported instead.
+  - Fix a remote cursor leak after a failed oracle_execute call.
+    A few hundred failed calls in the same transaction could exhaust the
+    Oracle cursor limit with ORA-01000.
+  - Fix errors with queries using node types introduced in recent PostgreSQL
+    releases.  The errors look like
+      Internal oracle_fdw error: encountered unknown node type 46.
+    Report and analysis by Ziming Zhang.
 
   Enhancements:
   - If transaction_read_only is on (including on a hot standby), open the
